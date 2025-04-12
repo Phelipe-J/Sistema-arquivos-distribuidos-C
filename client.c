@@ -14,59 +14,65 @@
 #define BUFFER_SIZE    1024
 #define OPCODE_SIZE 5
 
-int listFiles(SOCKET);
-int deleteFile(SOCKET);
-int uploadFile(SOCKET);
-int downloadFile(SOCKET);
+
+
+typedef int (*funcptr)(SOCKET, char*);
+
+typedef struct {
+    const char* name;
+    funcptr func;
+}command;
+
+int listFiles(SOCKET, char*);
+int deleteFile(SOCKET, char*);
+int uploadFile(SOCKET, char*);
+int downloadFile(SOCKET, char*);
 
 int communication(SOCKET monitorSocket){
     int bytesSent = 0;
     int bytesRecv = 0;
-    char msg[BUFFER_SIZE];
     char recvBuf[BUFFER_SIZE];
-    int opcode = 0;
-    
+    char commandBuffer[BUFFER_SIZE];
+
+    command commands[] = {
+        {"ls", listFiles},
+        {"del", deleteFile},
+        {"up", uploadFile},
+        {"dw", downloadFile},
+        {NULL, NULL}
+    };
+
     while(1){
-        if(fgets(msg, OPCODE_SIZE, stdin)){
-            opcode = atoi(msg);
-            bytesSent = send(monitorSocket, msg, (int)strlen(msg), 0);
+        if(fgets(commandBuffer, BUFFER_SIZE, stdin)){
+            commandBuffer[strcspn(commandBuffer, "\n")] = '\0';
 
-            if (bytesSent == SOCKET_ERROR) {
-                fprintf(stderr, "send falhou: %d\n", WSAGetLastError());
-                closesocket(monitorSocket);
-                WSACleanup();
-                return 1;
-            }
-            else{
-                switch (opcode){
-                case 1:
-                    listFiles(monitorSocket);
-                    break;
+            char* commandInput = strtok(commandBuffer, " ");
+            char* argument = strtok(NULL, " ");
 
-                case 2:
-                    deleteFile(monitorSocket);
-                    break;
+            command* chosenCommand = NULL;
 
-                case 3:
-                    uploadFile(monitorSocket);
-                    break;
-
-                case 4:
-                    downloadFile(monitorSocket);
-                    break;
-                    
-                default:
-                    printf("Codigo invalido.\n");
+            for(int i = 0; commands[i].name != NULL; i++){
+                if(strcmp(commandInput, commands[i].name) == 0){
+                    chosenCommand = &commands[i];
                     break;
                 }
             }
-            memset(msg, 0, BUFFER_SIZE);
+
+            if(chosenCommand == NULL){
+                printf("comando invalido.\n");
+            }
+            else{
+                chosenCommand->func(monitorSocket, argument);
+            }
         }
     }
     return 0;
 }
 
-int listFiles(SOCKET monitorSocket){
+int listFiles(SOCKET monitorSocket, char* argument){
+
+    send(monitorSocket, "1", 2, 0);
+
     char buffer[BUFFER_SIZE];
     int packageAmount = 0;
 
@@ -83,15 +89,14 @@ int listFiles(SOCKET monitorSocket){
     return 0;
 }
 
-int deleteFile(SOCKET monitorSocket){
-    char buffer[BUFFER_SIZE];
-    char fileName[BUFFER_SIZE];
+int deleteFile(SOCKET monitorSocket, char* fileName){
+    send(monitorSocket, "2", 2, 0);
 
-    fgets(fileName, BUFFER_SIZE, stdin);
-    fileName[strcspn(fileName, "\n")] = 0;
+    char buffer[BUFFER_SIZE];
 
     send(monitorSocket, fileName, BUFFER_SIZE, 0);
 
+    memset(buffer, 0, BUFFER_SIZE);
     recv(monitorSocket, buffer, BUFFER_SIZE, 0);
 
     printf("%s", buffer);
@@ -99,15 +104,14 @@ int deleteFile(SOCKET monitorSocket){
     return 0;
 }
 
-int uploadFile(SOCKET monitorSocket){
+int uploadFile(SOCKET monitorSocket, char* filePath){
+    send(monitorSocket, "3", 2, 0);
+
     char buffer[BUFFER_SIZE];
-    char filePath[BUFFER_SIZE];
+    memset(buffer, 0, BUFFER_SIZE);
     char* fileName;
     int packageAmount = 0;
-    
-    printf("Insira o caminho do arquivo.\n");
-    fgets(filePath, BUFFER_SIZE, stdin);
-    filePath[strcspn(filePath, "\n")] = 0; 
+
     fileName = strrchr(filePath, '\\');
     fileName++;
 
@@ -129,6 +133,7 @@ int uploadFile(SOCKET monitorSocket){
 
     rewind(fptr);
 
+    memset(buffer, 0, BUFFER_SIZE);
     recv(monitorSocket, buffer, BUFFER_SIZE, 0); // Espera resposta para começar a enviar os pacotes
 
     if(strcmp(buffer, "1") == 0){
@@ -148,6 +153,7 @@ int uploadFile(SOCKET monitorSocket){
 
     fclose(fptr);
 
+    memset(buffer, 0, BUFFER_SIZE);
     recv(monitorSocket, buffer, BUFFER_SIZE, 0);
 
     printf("%s", buffer);
@@ -155,14 +161,13 @@ int uploadFile(SOCKET monitorSocket){
     return 0;
 }
 
-int downloadFile(SOCKET monitorSocket){
+int downloadFile(SOCKET monitorSocket, char* fileName){
+    send(monitorSocket, "4", 2, 0);
+
     char buffer[BUFFER_SIZE];
-    char fileName[BUFFER_SIZE];
+    memset(buffer, 0, BUFFER_SIZE);
     int packageAmount = 0;
     FILE* fptr;
-
-    fgets(fileName, BUFFER_SIZE, stdin);
-    fileName[strcspn(fileName, "\n")] = 0;
 
     fptr = fopen(fileName, "wb");
 

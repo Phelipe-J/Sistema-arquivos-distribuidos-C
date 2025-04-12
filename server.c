@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#include <sys/stat.h>
 
 #include "info.h"
 //OBS MONITOR_IP foi definido em info.h
@@ -61,9 +62,12 @@ int deleteFile(SOCKET monitorSocket){
 
     printf("Remover arquivo.\n");
 
+    memset(buffer, 0, BUFFER_SIZE);
     recv(monitorSocket, buffer, BUFFER_SIZE, 0);       //recebe nome do arquivo
 
     strcat(path, buffer);
+
+    printf("path: %s\n", path);
 
     result = remove(path);
 
@@ -83,7 +87,35 @@ int deleteFile(SOCKET monitorSocket){
     return 1;
 }
 
-int uploadFile(SOCKET monitorSocket){
+int createFolder(SOCKET monitorSocket){
+    printf("criar pasta.\n");
+    
+    char* buffer[BUFFER_SIZE];
+    int result = 0;
+
+    memset(buffer, 0, BUFFER_SIZE);
+    recv(monitorSocket, buffer, BUFFER_SIZE, 0);    // Recebe nome da pasta
+
+    char* path = malloc(sizeof(PATH) + strlen(buffer));
+    strcpy(path, PATH);
+    strcat(path, buffer);
+
+    result = mkdir(path);
+
+    if(!result){
+        printf("Pasta criada.\n");
+    }
+    else{
+        printf("Nao foi possivel criar pasta.\n");
+        free(path);
+        return 1;
+    }
+
+    free(path);
+    return 0;
+}
+
+int uploadFile(SOCKET monitorSocket){       //ainda nao utilizado.
     char buffer[BUFFER_SIZE];
     int packageAmount = 0;
     int i = 0;

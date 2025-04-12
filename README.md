@@ -2,12 +2,15 @@
  Um sistema de arquivos distribuídos criado em C, estágios iniciais, ainda só é possível utilizar 1 servidor por vez.
 
  comandos:
-    1 - listar
-    2 - deletar
-    3 - upload
-    4 - download
+ 
+    ls - listar
 
-1 e 4 requerem o nome do arquivo logo em seguida (incluindo a extensão).
-3 requer o caminho total do arquivo no sistema.
+    del [nome] - deletar
+
+    up [path] - upload
+
+    dw [nome] - download
+
+
 
 (Compilar com -lws2_32)

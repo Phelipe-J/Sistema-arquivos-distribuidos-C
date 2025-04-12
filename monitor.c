@@ -54,12 +54,12 @@ unsigned __stdcall client_handler(void *arg) {      // Thread cliente
     strcpy(path, PATH);
     strcat(path, "clientInfo.bin");
 
-    folder root;
+    folder* root = malloc(sizeof(folder));
 
-    root.name = "root";
-    root.fileAmount = 0;
-    root.first = NULL;
-    root.last = NULL;
+    root->name = "root";
+    root->fileAmount = 0;
+    root->first = NULL;
+    root->last = NULL;
 
     FILE* clientInfo = fopen(path, "rb+");
 
@@ -74,7 +74,7 @@ unsigned __stdcall client_handler(void *arg) {      // Thread cliente
         while(fgets(buffer, BUFFER_SIZE, clientInfo) != NULL){
             
             buffer[strcspn(buffer, "\n")] = 0;
-            addFile(&root, buffer);
+            addFile(root, buffer);
             memset(buffer, 0, BUFFER_SIZE);
         }
     }
@@ -82,11 +82,11 @@ unsigned __stdcall client_handler(void *arg) {      // Thread cliente
     fclose(clientInfo);
 
     while(1){
-        showFiles(&root);
+        showFiles(root);
 
         bytes = recv(clientSocket, recBuffer, BUFFER_SIZE, 0);
         if(bytes > 0){
-            printf("Mensagem recebida (%llu): %s", (unsigned long long)clientSocket, recBuffer);
+            //printf("Mensagem recebida (%llu): %s", (unsigned long long)clientSocket, recBuffer);
             opcode = atoi(recBuffer);
             
             fflush(stdout);
@@ -98,13 +98,13 @@ unsigned __stdcall client_handler(void *arg) {      // Thread cliente
                 break;
 
             case 2:
-                deleteFile(clientSocket, &root);
-                saveMem(&root, path);
+                deleteFile(clientSocket, root);
+                saveMem(root, path);
                 break;
 
             case 3:
-                uploadFile(clientSocket, &root);
-                saveMem(&root, path);
+                uploadFile(clientSocket, root);
+                saveMem(root, path);
                 break;
 
             case 4:
@@ -186,6 +186,7 @@ int listFiles(SOCKET clientSocket, char* path){
 
     int packageAmount = 0;
     char buffer[BUFFER_SIZE];
+    memset(buffer, 0, BUFFER_SIZE);
 
     FILE* fptr = fopen(path, "rb");
 
@@ -213,6 +214,7 @@ int listFiles(SOCKET clientSocket, char* path){
 
 int deleteFile(SOCKET clientSocket, folder* fold){
     char buffer[BUFFER_SIZE];
+    memset(buffer, 0, BUFFER_SIZE);
     
     printf("remover arquivo.\n");
 
@@ -303,7 +305,10 @@ int removeFile(folder* fold, char* fileName){
                 previous->next = current->next;
             }
 
+            
             free(current->name);
+          
+            
             free(current);
             fold->fileAmount--;
 
