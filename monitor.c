@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <windows.h>
 #include <math.h>
+#include "fileStructure.h"
 
 #define CLIENTS_PORT "6669"
 #define SERVERS_PORT "6670"
@@ -18,30 +19,30 @@
 SOCKET serversSockets[MAX_SERVER_AMOUNT];
 int serverAmount = 0;
 
-typedef struct File{
-    char* name;
-    struct File* next;
-}file;
-
-typedef struct Folder{
-    char* name;
-    file* first;
-    file* last;
-    int fileAmount;
-}folder;
-
-int listFiles(SOCKET, char*);
+int listFiles(SOCKET, folder*);
 int deleteFile(SOCKET, folder*);
 int uploadFile(SOCKET, folder*);
 int downloadFile(SOCKET);
 
-int saveMem(folder*, char*);
-int addFile(folder*, char*);
-int removeFile(folder*, char*);
-int showFiles(folder*);
+file* addFile(file*, char*);
+folder* addFolder(folder*, char*, folder*);
+file* findFile(file*, char*);
+folder* findFolder(folder*, char*);
+file* removeFile(file*, char*);
+void freeFiles(file*);
+void freeFolders(folder*);
+folder* removeFolder(folder*, char*);
+void saveFiles(file*, FILE*);
+void saveFolders(folder*, FILE*);
+int memSave(folder*, char*);
+char* getLine(FILE*);
+folder* memLoad(FILE*);
+void getFiles(file*, char*);
+void getFolders(folder*, char*);
 
 unsigned __stdcall client_handler(void *arg) {      // Thread cliente
     SOCKET clientSocket = (SOCKET)(size_t)arg;
+    char* clientName = "client1";
     char recBuffer[BUFFER_SIZE];
     int bytes;
     char** files;
@@ -54,36 +55,21 @@ unsigned __stdcall client_handler(void *arg) {      // Thread cliente
     strcpy(path, PATH);
     strcat(path, "clientInfo.bin");
 
-    folder* root = malloc(sizeof(folder));
-
-    root->name = "root";
-    root->fileAmount = 0;
-    root->first = NULL;
-    root->last = NULL;
-
-    FILE* clientInfo = fopen(path, "rb+");
+    FILE* clientInfo = fopen(path, "rb");
 
     if(clientInfo == NULL){
         FILE* clientInfo = fopen(path, "wb+");
-        fclose(clientInfo);
+        fprintf(clientInfo, "%s<\n>\n", clientName);
+        rewind(clientInfo);
     }
-    else{
-
-        memset(buffer, 0, BUFFER_SIZE);
-
-        while(fgets(buffer, BUFFER_SIZE, clientInfo) != NULL){
-            
-            buffer[strcspn(buffer, "\n")] = 0;
-            addFile(root, buffer);
-            memset(buffer, 0, BUFFER_SIZE);
-        }
-    }
+    
+    folder* root = memLoad(clientInfo);
 
     fclose(clientInfo);
 
-    while(1){
-        showFiles(root);
+    folder* currentFolder = root;
 
+    while(1){
         bytes = recv(clientSocket, recBuffer, BUFFER_SIZE, 0);
         if(bytes > 0){
             //printf("Mensagem recebida (%llu): %s", (unsigned long long)clientSocket, recBuffer);
@@ -94,17 +80,17 @@ unsigned __stdcall client_handler(void *arg) {      // Thread cliente
             switch (opcode)
             {
             case 1:
-                listFiles(clientSocket, path);
+                listFiles(clientSocket, currentFolder);
                 break;
 
             case 2:
-                deleteFile(clientSocket, root);
-                saveMem(root, path);
+                deleteFile(clientSocket, currentFolder);
+                memSave(currentFolder, path);
                 break;
 
             case 3:
-                uploadFile(clientSocket, root);
-                saveMem(root, path);
+                uploadFile(clientSocket, currentFolder);
+                memSave(currentFolder, path);
                 break;
 
             case 4:
@@ -181,38 +167,384 @@ int serverAccept(SOCKET serverListenSocket){
     return 0;
 }
 
-int listFiles(SOCKET clientSocket, char* path){
+file* addFile(file* root, char* name){
+    if(root == NULL){
+        file* newFile = malloc(sizeof(file));
+
+        if(newFile == NULL){
+            printf("Arquivo invalido por algum motivo.\n");
+            return NULL;
+        }
+
+        char* newFileName = malloc(strlen(name));
+        strcpy(newFileName, name);
+
+        newFile->name = newFileName;
+        newFile->left = NULL;
+        newFile->right = NULL;
+
+        return newFile;
+    }
+
+    int cmp = strcmp(name, root->name);
+    if(cmp < 0){
+        root->left = addFile(root->left, name);
+    }
+    else if(cmp > 0){
+        root->right = addFile(root->right, name);
+    }
+    else{
+        printf("arquivo com esse nome ja existe");
+    }
+
+    return root;
+}
+
+folder* addFolder(folder* root, char* name, folder* parent){
+    if(root == NULL){
+        folder* newFolder = malloc(sizeof(folder));
+
+        if(newFolder == NULL){
+            printf("Arquivo invalido por algum motivo.\n");
+            return NULL;
+        }
+
+        //printf("strlen: %d", strlen(name));
+        char* newFolderName = malloc(sizeof(char) * strlen(name));
+
+        if(newFolderName == NULL){
+            perror("Erro ao alocar nome");
+            printf("strlen: %s", strlen(name));
+        }
+
+        strcpy(newFolderName, name);
+
+        newFolder->name = newFolderName;
+        newFolder->parentFolder = parent;
+        newFolder->files = NULL;
+        newFolder->left = NULL;
+        newFolder->right = NULL;
+        newFolder->subFolders = NULL;
+
+        return newFolder;
+    }
+
+    int cmp = strcmp(name, root->name);
+
+    if(cmp < 0){
+        root->left = addFolder(root->left, name, parent);
+    }
+    else if(cmp > 0){
+        root->right = addFolder(root->right, name, parent);
+    }
+    else{
+        printf("pasta com esse nome ja existe");
+    }
+
+    return root;
+}
+
+file* findFile(file* root, char* name){
+    if(root == NULL){
+        printf("Arquivo invalido.\n");
+        return NULL;
+    }
+
+    int cmp = strcmp(name, root->name);
+
+    if(cmp == 0){
+        return root;
+    }
+    else if(cmp < 0){
+        return findFile(root->left, name);
+    }
+    else{
+        return findFile(root->right, name);
+    }
+}
+
+folder* findFolder(folder* root, char* name){
+
+    if(root == NULL){
+        printf("Pasta invalida.\n");
+        return NULL;
+    }
+
+    int cmp = strcmp(name, root->name);
+
+    if(cmp == 0){
+        return root;
+    }
+    else if(cmp < 0){
+        return findFolder(root->left, name);
+    }
+    else{
+        return findFolder(root->right, name);
+    }
+}
+
+file* removeFile(file* root, char* name){
+    if(root == NULL) return NULL;
+
+    int cmp = strcmp(name, root->name);
+
+    if(cmp < 0){
+        return removeFile(root->left, name);
+    }
+    else if(cmp > 0){
+        return removeFile(root->right, name);
+    }
+    else{
+        if(root->left == NULL){
+            file* temp = root->right;
+            free(root->name);
+            free(root);
+            return temp;
+        }
+        else if(root->right == NULL){
+            file* temp = root->left;
+            free(root->name);
+            free(root);
+            return temp;
+        }
+        else{
+            file* child = root->right;
+            while(child->left != NULL){
+                child = child->left;
+            }
+            free(root->name);
+            root->name = child->name;       // Passar todas a informações de arquivo pro novo cara
+            root->right = removeFile(root->right, child->name);
+        }
+    }
+    return root;
+}
+
+void freeFiles(file* root){
+    if(root == NULL) return;
+
+    freeFiles(root->left);
+    freeFiles(root->right);
+    free(root->name);
+    free(root);
+}
+
+void freeFolders(folder* root){
+    if(root == NULL) return;
+
+    freeFolders(root->left);
+    freeFolders(root->right);
+    freeFiles(root->files);
+    freeFolders(root->subFolders);
+    free(root->name);
+    free(root);
+}
+
+folder* removeFolder(folder* root, char* name){
+    if(root == NULL) return NULL;
+
+    int cmp = strcmp(name, root->name);
+
+    if(cmp < 0){
+        return removeFolder(root->left, name);
+    }
+    else if(cmp > 0){
+        return removeFolder(root->right, name);
+    }
+    else{
+        if(root->left == NULL){
+            folder* temp = root->right;
+
+            freeFiles(root->files);
+            freeFolders(root->subFolders);
+
+            free(root->name);
+            free(root);
+            return temp;
+        }
+        else if(root->right == NULL){
+            folder* temp = root->left;
+
+            freeFiles(root->files);
+            freeFolders(root->subFolders);
+
+            free(root->name);
+            free(root);
+            return temp;
+        }
+        else{
+            folder* child = root->right;
+            while(child->left != NULL){
+                child = child->left;
+            }
+            free(root->name);
+            root->name = child->name;
+            root->right = removeFolder(root->right, child->name);
+        }
+    }
+    return root;
+}
+
+void saveFiles(file* root, FILE* fptr){
+
+    if(root == NULL) return;
+
+    fprintf(fptr, "%s:", root->name);
+
+    saveFiles(root->right, fptr);
+}
+
+void saveFolders(folder* root, FILE* fptr){
+    if(root == NULL) return;
+
+    saveFolders(root->left, fptr);
+
+    fprintf(fptr, "%s<", root->name);
+
+    saveFiles(root->files,fptr);
+    fprintf(fptr, "\n");
+    saveFolders(root->subFolders, fptr);
+    fprintf(fptr, ">\n", root->name);
+    saveFolders(root->right, fptr);
+}
+
+int memSave(folder* root, char* path){
+    FILE* fptr = fopen(path, "wb");
+
+    saveFolders(root, fptr);
+
+    fclose(fptr);
+    return 0;
+}
+
+char* getLine(FILE* fptr){
+    char buffer[BUFFER_SIZE];
+    memset(buffer, 0, BUFFER_SIZE);
+    char* fullLine = NULL;
+    size_t lineLength = 0;
+
+    while(fgets(buffer, BUFFER_SIZE, fptr)){
+        size_t bufferLength = strlen(buffer);
+        char* newLine = realloc(fullLine, lineLength + bufferLength + 1);
+        fullLine = newLine;
+        memcpy(fullLine + lineLength, buffer, bufferLength+1);
+        lineLength += bufferLength;
+
+        if(fullLine[lineLength-1] == '\n' || feof(fptr)){
+            fullLine[lineLength-1] = '\0';
+
+            //printf("%s", fullLine);
+            //printf("\nfile pos: %d\n", (int)ftell(fptr));
+
+            lineLength = 0;
+            return fullLine;
+        }
+    }
+}
+
+folder* memLoad(FILE* fptr){
+    folder* root = malloc(sizeof(folder));
+    char* line = getLine(fptr);
+
+    char* fileItems = strchr(line, '<');
+
+    *fileItems = '\0';
+
+    char* folderName = malloc(strlen(line));
+    strcpy(folderName,line);
+    //printf("\nline: %s\n", folderName);
+
+    root->name = folderName;
+    root->left = NULL;
+    root->right = NULL;
+    root->parentFolder = NULL;
+    root->subFolders = NULL;
+    root->files = NULL;
+
+    fileItems++;
+    char* token = strtok(fileItems, ":");
+    while(token){
+        //printf("f: %s\n", token);
+        root->files = addFile(root->files, token);
+        token = strtok(NULL, ":");
+    }
+
+    free(line);
+
+    folder* currentFolder = root;
+
+    while(!feof(fptr)){
+        line = getLine(fptr);
+        if(line == NULL) break;
+        if(line[0] == '>'){
+            if(currentFolder->parentFolder != NULL) currentFolder = currentFolder->parentFolder;
+            continue;
+        }
+
+        char* fileItems = strchr(line, '<');
+        *fileItems = '\0';
+
+        char* subFolderName = malloc(strlen(line));
+        strcpy(subFolderName, line);
+        currentFolder->subFolders = addFolder(currentFolder->subFolders, subFolderName, currentFolder);
+        
+        folder* tempfolder = findFolder(currentFolder->subFolders, subFolderName);
+
+        if(tempfolder != NULL) currentFolder = tempfolder;
+        
+        fileItems++;
+        char* token = strtok(fileItems, ":");
+        while(token){
+            //printf("f: %s\n", token);
+            currentFolder->files = addFile(currentFolder->files, token);
+            token = strtok(NULL, ":");
+        }
+
+        free(line);
+    }
+
+    return root;
+}
+
+void getFiles(file* root, char* storage){
+    if(root != NULL){
+        getFiles(root->left, storage);
+        strcat(storage, root->name);
+        strcat(storage, "\n");
+        getFiles(root->right, storage);
+    }
+}
+
+void getFolders(folder* root, char* storage){
+    if(root != NULL){
+        getFolders(root->left, storage);
+        strcat(storage, root->name);
+        strcat(storage, "\n");
+        getFolders(root->right, storage);
+    }
+}
+
+int listFiles(SOCKET clientSocket, folder* root){
     printf("listar arquivos.\n");
 
     int packageAmount = 0;
     char buffer[BUFFER_SIZE];
     memset(buffer, 0, BUFFER_SIZE);
 
-    FILE* fptr = fopen(path, "rb");
+    // Fazer algo pra caso seja maior que o buffer
+    sprintf(buffer, "Pasta: %s\nArquivos:\n", root->name);
+    getFiles(root->files, buffer);
+    strcat(buffer, "\nPastas:\n");
+    getFolders(root->subFolders, buffer);
 
-    fseek(fptr, 0L, SEEK_END);
-    packageAmount = ceil((float)ftell(fptr)/BUFFER_SIZE);
-
-    sprintf(buffer, "%d", packageAmount);
-
-    send(clientSocket, buffer, strlen(buffer), 0);  // Envia quantidade de pacotes
-    memset(buffer, 0, BUFFER_SIZE);
-
-    rewind(fptr);
-
-    for(int i = 0; i < packageAmount; i++){
-        memset(buffer, 0, BUFFER_SIZE);
-        fread(buffer, 1, BUFFER_SIZE, fptr);
-        send(clientSocket, buffer, BUFFER_SIZE, 0);
-    }
+    send(clientSocket, buffer, BUFFER_SIZE, 0);
 
     printf("list executado.\n");
 
-    fclose(fptr);
     return 0;
 }
 
-int deleteFile(SOCKET clientSocket, folder* fold){
+int deleteFile(SOCKET clientSocket, folder* root){
     char buffer[BUFFER_SIZE];
     memset(buffer, 0, BUFFER_SIZE);
     
@@ -224,7 +556,7 @@ int deleteFile(SOCKET clientSocket, folder* fold){
     recv(clientSocket, buffer, BUFFER_SIZE, 0);   // Recebe informações do arquivo (nome)
     send(serversSockets[0], buffer, strlen(buffer), 0);
 
-    removeFile(fold, buffer);
+    root->files = removeFile(root->files, buffer);
 
     memset(buffer, 0, BUFFER_SIZE);
     recv(serversSockets[0], buffer, BUFFER_SIZE, 0);
@@ -235,102 +567,7 @@ int deleteFile(SOCKET clientSocket, folder* fold){
     return 0;
 }
 
-int saveMem(folder* fold, char* path){
-
-    FILE* newFile = fopen(path, "wb");
-
-    file* temp = fold->first;
-    for(int i = 0; i < fold->fileAmount; i++){
-        fprintf(newFile, "%s\n", temp->name);
-        temp = temp->next;
-    }
-
-    fclose(newFile);
-
-    return 0;
-}
-
-int addFile(folder* fold, char* fileName){
-    file* newFile = malloc(sizeof(file));
-
-    char* name = malloc(sizeof(char) * strlen(fileName));
-    strcpy(name, fileName);
-
-    newFile->name = name;
-    newFile->next = NULL;
-
-    if(fold ->first == NULL){
-        fold->first = newFile;
-        fold->last = newFile;
-    }
-    else if(strcmp(fileName, fold->first->name) < 0){
-        newFile->next = fold->first;
-        fold->first = newFile;
-    }
-    else{
-        file* current = fold->first;
-
-        while(current->next != NULL && strcmp(current->next->name, fileName) < 0){
-            current = current->next;
-        }
-
-        newFile->next = current->next;
-        current->next = newFile;
-    }
-
-    fold->fileAmount++;
-
-    return 0;
-}
-
-int removeFile(folder* fold, char* fileName){
-
-    if(fold->first == NULL){
-        printf("erro em removeFile, folder vazio.\n");
-        return 1;
-    }
-
-    file* current = fold->first;
-    file* previous = NULL;
-    
-    while(current != NULL){
-        if(strcmp(current->name, fileName) == 0){
-            if(previous == NULL){       // primeiro da lista
-                fold->first = current->next;
-                if(current->next == NULL){      // unico da lista
-                    fold->last = NULL;
-                } 
-            }
-            else{
-                previous->next = current->next;
-            }
-
-            
-            free(current->name);
-          
-            
-            free(current);
-            fold->fileAmount--;
-
-            return 0;
-        }
-        previous = current;
-        current = current->next;
-    }
-
-    printf("erro em reveFile, file nao encontrado");
-    return 1;
-}
-
-int showFiles(folder* fold){
-    file* temp = fold->first;
-    for(int i = 0; i < fold->fileAmount; i++){
-        printf("%s\n", temp->name);
-        temp = temp->next;
-    }
-}
-
-int uploadFile(SOCKET clientSocket, folder* fold){
+int uploadFile(SOCKET clientSocket, folder* root){
     char buffer[BUFFER_SIZE];
     int packageAmount = 0;
     int i = 0;
@@ -377,7 +614,7 @@ int uploadFile(SOCKET clientSocket, folder* fold){
     recv(serversSockets[0], buffer, BUFFER_SIZE, 0);
     send(clientSocket, buffer, strlen(buffer), 0);
 
-    addFile(fold, fileName);
+    root->files = addFile(root->files, fileName);
     free(fileName);
 
     return 0;

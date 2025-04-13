@@ -76,15 +76,20 @@ int listFiles(SOCKET monitorSocket, char* argument){
     char buffer[BUFFER_SIZE];
     int packageAmount = 0;
 
-    recv(monitorSocket, buffer, BUFFER_SIZE, 0);    //recebe quantidade de pacotes
+    //recv(monitorSocket, buffer, BUFFER_SIZE, 0);    //recebe quantidade de pacotes
 
-    packageAmount = atoi(buffer);
+    //packageAmount = atoi(buffer);
 
+    /*
     for(int i = 0; i < packageAmount; i++){
         memset(buffer, 0, BUFFER_SIZE);
         recv(monitorSocket, buffer, BUFFER_SIZE, 0);
         printf("%s", buffer);
     }
+    */
+    printf("\n\n");
+    recv(monitorSocket, buffer, BUFFER_SIZE, 0);
+    printf(buffer);
 
     return 0;
 }
