@@ -13,13 +13,6 @@
 #define TYPE_SIZE 5
 #define DATA_SIZE (BUFFER_SIZE - CODE_SIZE - TYPE_SIZE - sizeof(int))
 
-/* Package:
-    types:
-    code
-    data
-    erro
-*/
-
 #define FEOF "feof\0"
 #define DATA "data\0"
 #define ERRO "erro\0"
@@ -57,13 +50,7 @@ package* fillPackage(char* type, char* code, char* data, int dataSize){
     strcpy(pkg->code, code);
 
     pkg->dataSize = dataSize;
-
-    //strcpy(pkg->data, data);
-
-    //memcpy(pkg->type, type, TYPE_SIZE);
-    //memcpy(pkg->code, code, CODE_SIZE);
-
-
+    
     memcpy(pkg->data, data, dataSize);
 
     return pkg;
@@ -102,69 +89,6 @@ void openPackage(package* pkg, char* buffer){
     offset += sizeof(int);
 
     memcpy(pkg->data, buffer+offset, pkg->dataSize);
-
-
-    /*
-    
-    package* pkg = malloc(sizeof(package));
-
-    char* temp = malloc(size);
-    strcpy(temp, buffer);
-
-    char* token = strtok(temp, ":");
-    //printf("%s\n", token);
-    strcpy(pkg->type, token);
-    token = strtok(NULL, ":");
-    //printf("%s\n", token);
-    strcpy(pkg->code, token);
-    token = strtok(NULL, ":");
-    //printf("%s\n", token);
-    strcpy(pkg->data, token);
-
-    free(temp);
-    */
-
-    /*                                                      // ESSE AQUI FOI O ÚNICO QUE FUNCIONOU ANTES DA BIG MUDANÇA
-    package* pkg = malloc(sizeof(package));
-    int i = 0;
-    int j = 0;
-    while(buffer[i] != ':'){
-        pkg->type[j] = buffer[i];
-        i++;
-        j++;
-    }
-    pkg->type[i] = '\0';
-    i++;
-    j = 0;
-    while(buffer[i] != ':'){
-        pkg->code[j] = buffer[i];
-        i++;
-        j++;
-    }
-    pkg->code[j] = '\0';
-    i++;
-    buffer += i;
-    strncpy(pkg->data, buffer, DATA_SIZE);
-    */
-
-    /*
-    strncpy(pkg->type, buffer, TYPE_SIZE-1);
-    //pkg->type[TYPE_SIZE-1] = '\0';
-    buffer += TYPE_SIZE-1;
-    strncpy(pkg->code, buffer, CODE_SIZE-1);
-    //pkg->code[CODE_SIZE-1] = '\0';
-    buffer += CODE_SIZE-1;
-    strcpy(pkg->data, buffer);
-    */
-
-    //printf("asdnsa: %d\n", strlen(pkg->data));
-    //printf("asdasdnsa: %d\n", strlen(buffer));
-
-
-
-
-
-    //return pkg;
 }
 
 int receivePackage(SOCKET sock, package** pkg, int flag){
@@ -187,43 +111,10 @@ int receivePackage(SOCKET sock, package** pkg, int flag){
     openPackage(*pkg, buffer);
 
     return 1;
-    
-    /*
-    if(result <= 0){
-        *pkg = malloc(sizeof(package));
-        return result;
-    }
-
-    printf("Pkg size: %d\n", result);
-
-    *pkg = openPackage(buffer);
-
-    if(strcmp((*pkg)->type, DATA) != 0){
-        printf("psahjkdfjikholdfs\n");
-    }
-
-    result -= (TYPE_SIZE + CODE_SIZE);
-    */
-
-    //return received;
 }
 
 int __stdcall sendPackage(SOCKET sock, package* pkg, int flag){
     char buffer[BUFFER_SIZE];
-
-    /*
-    int bufferSize = snprintf(buffer, BUFFER_SIZE, "%s:%s:%s", pkg->type, pkg->code, pkg->data);    // <-- O PROBLEMA TÁ AQUI, IMAGEM NÃO É STRING, NÃO
-                                                                                                    // DÁ PRA PASSAR ESSA MERDA COMO %S, PROVAVELMENTE TEREU
-                                                                                                    // QUE USAR OUTRA FUNÇÃO
-    bufferSize++;
-
-    if(strcmp(pkg->type, DATA) != 0){
-        printf("dsfhjklfdsjdfs\n");
-    }
-
-    printf("buffer: %d\n", bufferSize);
-
-    */
 
     serialize(pkg, buffer);
 
