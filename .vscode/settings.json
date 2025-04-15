@@ -5,6 +5,7 @@
         "string.h": "c",
         "math.h": "c",
         "stdlib.h": "c",
-        "ws2tcpip.h": "c"
+        "ws2tcpip.h": "c",
+        "filestructure.h": "c"
     }
 }

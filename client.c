@@ -1,34 +1,37 @@
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <math.h>
+#include "fileStructure.h"
 
-#include "info.h"
 //OBS MONITOR_IP foi definido em info.h
 
 #define CLIENTS_PORT "6669"
 #define SERVERS_PORT "6670"
 
+#define PATH "S:\\Sistemas_Distribuidos\\client\\"
 
-#define BUFFER_SIZE    1024
-#define OPCODE_SIZE 5
+SOCKET connectionSocket;
 
-
-
-typedef int (*funcptr)(SOCKET, char*);
+typedef int (*funcptr)(char*);
 
 typedef struct {
     const char* name;
     funcptr func;
 }command;
 
-int listFiles(SOCKET, char*);
-int deleteFile(SOCKET, char*);
-int uploadFile(SOCKET, char*);
-int downloadFile(SOCKET, char*);
+int listFiles(char*);
+int deleteFile(char*);
+int uploadFile(char*);
+int downloadFile(char*);
 
-int communication(SOCKET monitorSocket){
+BOOL WINAPI consoleHandler(DWORD signal){
+    if(signal == CTRL_CLOSE_EVENT){
+        printf("Fechando aplicação...\n");
+        shutdown(connectionSocket, SD_BOTH);
+        closesocket(connectionSocket);
+        WSACleanup();
+    }
+    return TRUE;
+}
+
+int communication(){
     int bytesSent = 0;
     int bytesRecv = 0;
     char recvBuf[BUFFER_SIZE];
@@ -62,60 +65,83 @@ int communication(SOCKET monitorSocket){
                 printf("comando invalido.\n");
             }
             else{
-                chosenCommand->func(monitorSocket, argument);
+                chosenCommand->func(argument);
             }
         }
     }
     return 0;
 }
 
-int listFiles(SOCKET monitorSocket, char* argument){
+int listFiles(char* argument){
 
-    send(monitorSocket, "1", 2, 0);
+    printf("list\n");
+
+    package* code = fillPackage(DATA, NORMAL, "1\0", 2);
+
+    sendPackage(connectionSocket, code, 0);
+    free(code);
 
     char buffer[BUFFER_SIZE];
+    memset(buffer, 0, BUFFER_SIZE);
     int packageAmount = 0;
 
-    //recv(monitorSocket, buffer, BUFFER_SIZE, 0);    //recebe quantidade de pacotes
-
-    //packageAmount = atoi(buffer);
-
-    /*
-    for(int i = 0; i < packageAmount; i++){
-        memset(buffer, 0, BUFFER_SIZE);
-        recv(monitorSocket, buffer, BUFFER_SIZE, 0);
-        printf("%s", buffer);
-    }
-    */
     printf("\n\n");
-    recv(monitorSocket, buffer, BUFFER_SIZE, 0);
-    printf(buffer);
+
+    package* msg;
+    if(receivePackage(connectionSocket, &msg, 0) <= 0){
+        printf("Conexao perdida com o servidor.\n");
+        return -1;
+    }
+    
+    if(strcmp(msg->type, DATA) != 0){
+        printf("Erro %s: $s", msg->code, msg->data);
+        return -1;
+    }
+
+    printf(msg->data);
+
+
+    free(msg);
 
     return 0;
 }
 
-int deleteFile(SOCKET monitorSocket, char* fileName){
-    send(monitorSocket, "2", 2, 0);
+int deleteFile(char* fileName){
+    package* code = fillPackage(DATA, NORMAL, "2\0", 2);
 
-    char buffer[BUFFER_SIZE];
+    sendPackage(connectionSocket, code, 0);                // envia operação
+    free(code);
 
-    send(monitorSocket, fileName, BUFFER_SIZE, 0);
+    package* pkg = fillPackage(DATA, NORMAL, fileName, strlen(fileName)+1);
+    sendPackage(connectionSocket, pkg, 0);
+    free(pkg);
 
-    memset(buffer, 0, BUFFER_SIZE);
-    recv(monitorSocket, buffer, BUFFER_SIZE, 0);
+    if(receivePackage(connectionSocket, &pkg, 0) <= 0){
+        printf("Conexao com servidor perdida.\n");
+        free(pkg);
+        return -1;
+    }
 
-    printf("%s", buffer);
+    if(strcmp(pkg->type, DATA) != 0){
+        printf("ERRO: %s: %s", pkg->code, pkg->data);
+        free(pkg);
+        return -1;
+    }
 
+    printf("%s", pkg->data);
+
+    free(pkg);
     return 0;
 }
 
-int uploadFile(SOCKET monitorSocket, char* filePath){
-    send(monitorSocket, "3", 2, 0);
+int uploadFile(char* filePath){
+    package* code = fillPackage(DATA, NORMAL, "3\0", 2);
+    sendPackage(connectionSocket, code, 0);                // envia operação
+    free(code);
 
-    char buffer[BUFFER_SIZE];
-    memset(buffer, 0, BUFFER_SIZE);
     char* fileName;
     int packageAmount = 0;
+    package* pkg;
 
     fileName = strrchr(filePath, '\\');
     fileName++;
@@ -125,76 +151,138 @@ int uploadFile(SOCKET monitorSocket, char* filePath){
     FILE* fptr = fopen(filePath, "rb");
 
     fseek(fptr, 0L, SEEK_END);
-    packageAmount = ceil((float)ftell(fptr)/BUFFER_SIZE);
-
-    printf("pkg amount: %d\n", packageAmount);
+    packageAmount = ceil((float)ftell(fptr)/BUFFER_SIZE);           // FUnções inúteis remover depois
+    char buffer[DATA_SIZE];
+    memset(buffer, 0, DATA_SIZE);
 
     sprintf(buffer, "%d;%s", packageAmount, fileName);
 
-    printf("buffer: %s\n", buffer);
+    pkg = fillPackage(DATA, NORMAL, buffer, strlen(buffer)+1);
 
-    send(monitorSocket, buffer, strlen(buffer), 0);  // Envia informações do arquivo
-    memset(buffer, 0, BUFFER_SIZE);
+    if(sendPackage(connectionSocket, pkg, 0) <= 0){                 // Envia informações do arquivo
+        printf("Conexao com servidor perdida.\n");
+        free(pkg);
+        return -1;
+    }
+    free(pkg);
 
-    rewind(fptr);
+    rewind(fptr);           
 
-    memset(buffer, 0, BUFFER_SIZE);
-    recv(monitorSocket, buffer, BUFFER_SIZE, 0); // Espera resposta para começar a enviar os pacotes
+    if(receivePackage(connectionSocket, &pkg, 0) <= 0){                 // Espera resposta para começar a enviar os pacotes
+        printf("Conexao com servidor perdida.\n");
+        free(pkg);
+        return -1;
+    }
 
-    if(strcmp(buffer, "1") == 0){
+    if(strcmp(pkg->type, DATA) != 0){
+        printf("ERRO: %s: %s", pkg->code, pkg->data);
+        free(pkg);
+        return -1;
+    }
 
-        memset(buffer, 0, BUFFER_SIZE);
+    free(pkg);
 
-        for(int i = 0; i < packageAmount; i++){
-            fread(buffer, 1, BUFFER_SIZE, fptr);
-            send(monitorSocket, buffer, BUFFER_SIZE, 0);
-            memset(buffer, 0, BUFFER_SIZE);
+    while(!feof(fptr)){                                 // Envia os pacotes
+        memset(buffer, 0, DATA_SIZE);
+        int dataSize = fread(buffer, 1, DATA_SIZE, fptr);
+
+        pkg = fillPackage(DATA, NORMAL, buffer, dataSize);
+        if(sendPackage(connectionSocket, pkg, 0) <= 0){
+            printf("Conexao com servidor perdida.\n");
+            free(pkg);
+            return -1;
         }
-    }
-    else{
-        printf("%s", buffer);
-        return 1;
-    }
 
+        free(pkg);
+    }
     fclose(fptr);
 
-    memset(buffer, 0, BUFFER_SIZE);
-    recv(monitorSocket, buffer, BUFFER_SIZE, 0);
+    pkg = fillPackage(FEOF, NORMAL, "Acabou o arquivo.\n", strlen("Acabou o arquivo.\n")+1);
+    if(sendPackage(connectionSocket, pkg, 0) <= 0){
+        printf("Conexao com servidor perdida.\n");
+        free(pkg);
+        return -1;
+    }
 
-    printf("%s", buffer);
+    free(pkg);
 
+    if(receivePackage(connectionSocket, &pkg, 0) > 0){
+        printf("%s", pkg->data);
+    }
+    else{
+        printf("Conexao com servidor perdida, resultado incerto.\n");
+    }
+
+    free(pkg);
     return 0;
 }
 
-int downloadFile(SOCKET monitorSocket, char* fileName){
-    send(monitorSocket, "4", 2, 0);
+int downloadFile(char* fileName){
+    FILE* fptr;
+
+    char path[BUFFER_SIZE];
+    memset(path, 0, BUFFER_SIZE);
+    strcpy(path, PATH);
+    strcat(path, fileName);
+
+    fptr = fopen(path, "rb");
+
+    if((fptr != NULL)){
+        printf("Arquivo ja existe no destino.\n");
+        fclose(fptr);
+
+        return -1;
+    }
+
+    package* code = fillPackage(DATA, NORMAL, "4\0", 2);
+    sendPackage(connectionSocket, code, 0);                // envia operação
+    free(code);
 
     char buffer[BUFFER_SIZE];
     memset(buffer, 0, BUFFER_SIZE);
     int packageAmount = 0;
-    FILE* fptr;
 
-    fptr = fopen(fileName, "wb");
+    package* pkg = fillPackage(DATA, NORMAL, fileName, strlen(fileName)+1);
+    sendPackage(connectionSocket, pkg, 0);
+    free(pkg);
 
-    send(monitorSocket, fileName, BUFFER_SIZE, 0);      // Envia nome do arquivo
-
-    memset(buffer, 0, BUFFER_SIZE);
-    recv(monitorSocket, buffer, BUFFER_SIZE, 0);    //recebe se o servidor abriu o arquivo
-
-    if(strcmp(buffer, "1") != 0){
-        printf("%s", buffer);
-        fclose(fptr);
-        return 1;
+    if(receivePackage(connectionSocket, &pkg, 0) <= 0){                 // Espera resposta para começar a enviar os pacotes
+        printf("Conexao com servidor perdida.\n");
+        free(pkg);
+        return -1;
     }
 
-    memset(buffer, 0, BUFFER_SIZE);
-    recv(monitorSocket, buffer, BUFFER_SIZE, 0);    //recebe quantidade de pacotes
-    packageAmount = atoi(buffer);
+    if(strcmp(pkg->type, DATA) != 0){
+        printf("ERRO: %s: %s", pkg->code, pkg->data);
+        free(pkg);
+        return -1;
+    }
 
-    for(int i = 0; i < packageAmount; i++){
-        memset(buffer, 0, BUFFER_SIZE);
-        recv(monitorSocket, buffer, BUFFER_SIZE, 0);
-        fwrite(buffer, 1, BUFFER_SIZE, fptr);
+    fptr = fopen(path, "wb");
+
+    while(1){
+        free(pkg);
+        int result = receivePackage(connectionSocket, &pkg, 0);
+        if(result <= 0){
+            printf("Conexao com monitor perdida.\n");
+            fclose(fptr);
+            remove(path);
+            free(pkg);
+            return -1;
+        }
+        if(strcmp(pkg->type, ERRO) == 0){
+            printf("ERRO: %s: %s", pkg->code, pkg->data);
+            fclose(fptr);
+            remove(path);
+            free(pkg);
+            return -1;
+        }
+
+        if(strcmp(pkg->type, FEOF) == 0){
+            break;
+        }
+
+        fwrite(pkg->data, 1, pkg->dataSize, fptr);
     }
 
     fclose(fptr);
@@ -206,9 +294,11 @@ int downloadFile(SOCKET monitorSocket, char* fileName){
 
 int main() {
     WSADATA wsaData;
-    SOCKET monitorSocket = INVALID_SOCKET;
+    connectionSocket = INVALID_SOCKET;
     struct addrinfo hints = {0}, *result = NULL;
     
+    SetConsoleCtrlHandler(consoleHandler, TRUE);    // Manipulador de controle (para fechar o socket quando fechar a janela)
+
     // 1. Inicializa WinSock
     if (WSAStartup(MAKEWORD(2,2), &wsaData) != 0) {
         fprintf(stderr, "WSAStartup falhou\n");
@@ -227,8 +317,8 @@ int main() {
     }
 
     // 4. Cria o socket
-    monitorSocket = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
-    if (monitorSocket == INVALID_SOCKET) {
+    connectionSocket = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
+    if (connectionSocket == INVALID_SOCKET) {
         fprintf(stderr, "socket falhou: %d\n", WSAGetLastError());
         freeaddrinfo(result);
         WSACleanup();
@@ -236,9 +326,9 @@ int main() {
     }
 
     // 5. Conecta ao servidor
-    if (connect(monitorSocket, result->ai_addr, (int)result->ai_addrlen) == SOCKET_ERROR) {
+    if (connect(connectionSocket, result->ai_addr, (int)result->ai_addrlen) == SOCKET_ERROR) {
         fprintf(stderr, "connect falhou: %d\n", WSAGetLastError());
-        closesocket(monitorSocket);
+        closesocket(connectionSocket);
         freeaddrinfo(result);
         WSACleanup();
         return 1;
@@ -246,9 +336,9 @@ int main() {
     freeaddrinfo(result);
     printf("Conectado ao servidor %s:%s\n", MONITOR_IP, CLIENTS_PORT);
     
-    communication(monitorSocket);
+    communication(connectionSocket);
 
-    closesocket(monitorSocket);
-    WSACleanup();
+    //closesocket(connectionSocket);
+    //WSACleanup();
     return 0;
 }

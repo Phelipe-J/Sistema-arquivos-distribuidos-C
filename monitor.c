@@ -1,10 +1,3 @@
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <process.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <windows.h>
-#include <math.h>
 #include "fileStructure.h"
 
 #define CLIENTS_PORT "6669"
@@ -13,7 +6,6 @@
 #define PATH "S:\\Sistemas_Distribuidos\\monitor\\"     //caminho da pasta do monitor
 
 #define BACKLOG 10
-#define BUFFER_SIZE 1024
 #define MAX_SERVER_AMOUNT 1
 
 SOCKET serversSockets[MAX_SERVER_AMOUNT];
@@ -22,7 +14,7 @@ int serverAmount = 0;
 int listFiles(SOCKET, folder*);
 int deleteFile(SOCKET, folder*);
 int uploadFile(SOCKET, folder*);
-int downloadFile(SOCKET);
+int downloadFile(SOCKET, folder*);
 
 file* addFile(file*, char*);
 folder* addFolder(folder*, char*, folder*);
@@ -44,9 +36,8 @@ unsigned __stdcall client_handler(void *arg) {      // Thread cliente
     SOCKET clientSocket = (SOCKET)(size_t)arg;
     char* clientName = "client1";
     char recBuffer[BUFFER_SIZE];
-    int bytes;
+    int bytes = 0;
     char** files;
-    //char* sendBuffer = "Mensagem Recebida.\n";
     char buffer[BUFFER_SIZE];
     int opcode = 0;
 
@@ -58,9 +49,10 @@ unsigned __stdcall client_handler(void *arg) {      // Thread cliente
     FILE* clientInfo = fopen(path, "rb");
 
     if(clientInfo == NULL){
-        FILE* clientInfo = fopen(path, "wb+");
+        clientInfo = fopen(path, "wb");
         fprintf(clientInfo, "%s<\n>\n", clientName);
-        rewind(clientInfo);
+        fclose(clientInfo);
+        clientInfo = fopen(path, "rb");
     }
     
     folder* root = memLoad(clientInfo);
@@ -70,10 +62,17 @@ unsigned __stdcall client_handler(void *arg) {      // Thread cliente
     folder* currentFolder = root;
 
     while(1){
-        bytes = recv(clientSocket, recBuffer, BUFFER_SIZE, 0);
+        package* pkg;
+        bytes = receivePackage(clientSocket, &pkg, 0);
+
+        if(strcmp(pkg->type, DATA) != 0){
+            sendError(clientSocket, UNEXPECTED_TYPE, "Tipo de pacote inesperado\n");
+            free(pkg);
+            continue;
+        }
+
         if(bytes > 0){
-            //printf("Mensagem recebida (%llu): %s", (unsigned long long)clientSocket, recBuffer);
-            opcode = atoi(recBuffer);
+            opcode = atoi(pkg->data);
             
             fflush(stdout);
 
@@ -85,27 +84,35 @@ unsigned __stdcall client_handler(void *arg) {      // Thread cliente
 
             case 2:
                 deleteFile(clientSocket, currentFolder);
-                memSave(currentFolder, path);
+                memSave(root, path);
                 break;
 
             case 3:
                 uploadFile(clientSocket, currentFolder);
-                memSave(currentFolder, path);
+                memSave(root, path);
                 break;
 
             case 4:
-                downloadFile(clientSocket);
+                downloadFile(clientSocket, currentFolder);
                 break;
                     
+            case 5:
+
+                break;
             default:
                 printf("Codigo invalido.\n");
                 break;
             }
         }
-        else{
-            perror("recv");
+        else if(bytes < 0){
+            printf("Erro: %d\n", WSAGetLastError());
             break;
         }
+        else{
+            printf("Conexão encerrada pelo client.\n");
+            break;
+        }
+        free(pkg);
         memset(recBuffer, 0, BUFFER_SIZE);
     }
 
@@ -528,16 +535,20 @@ int listFiles(SOCKET clientSocket, folder* root){
     printf("listar arquivos.\n");
 
     int packageAmount = 0;
-    char buffer[BUFFER_SIZE];
-    memset(buffer, 0, BUFFER_SIZE);
+    char buffer[DATA_SIZE];
+    memset(buffer, 0, DATA_SIZE);
 
-    // Fazer algo pra caso seja maior que o buffer
-    sprintf(buffer, "Pasta: %s\nArquivos:\n", root->name);
+    // Fazer algo pra caso seja maior que o buffer ????
+    sprintf(buffer, "Pasta: %s\n\n|Arquivos|:\n", root->name);
     getFiles(root->files, buffer);
-    strcat(buffer, "\nPastas:\n");
+    strcat(buffer, "\n|Pastas|:\n");
     getFolders(root->subFolders, buffer);
 
-    send(clientSocket, buffer, BUFFER_SIZE, 0);
+    package* pkg = fillPackage(DATA, NORMAL, buffer, strlen(buffer)+1);
+
+    sendPackage(clientSocket, pkg, 0);
+
+    free(pkg);
 
     printf("list executado.\n");
 
@@ -545,116 +556,295 @@ int listFiles(SOCKET clientSocket, folder* root){
 }
 
 int deleteFile(SOCKET clientSocket, folder* root){
+    package* pkg;
     char buffer[BUFFER_SIZE];
     memset(buffer, 0, BUFFER_SIZE);
     
     printf("remover arquivo.\n");
 
-    send(serversSockets[0], "2", 2, 0);
+    if(receivePackage(clientSocket, &pkg, 0) <= 0){        // Recebe informações do arquivo (nome)
+        printf("Conexao perdida com o client.\n");
+        sendError(serversSockets[0], LOST_CONNECTION, "Conexao perdida com o client.\n");
+        free(pkg);
+        return -1;
+    }
 
-    memset(buffer, 0, BUFFER_SIZE);
-    recv(clientSocket, buffer, BUFFER_SIZE, 0);   // Recebe informações do arquivo (nome)
-    send(serversSockets[0], buffer, strlen(buffer), 0);
+    if(strcmp(pkg->type, ERRO) == 0){       // DEU ERRO
+        printf("ERRO: %s: %s", pkg->code, pkg->data);
+        sendError(serversSockets[0], pkg->code, pkg->data);
+        free(pkg);
+        return -1;
+    }
 
-    root->files = removeFile(root->files, buffer);
+    char fileName[DATA_SIZE];
+    strcpy(fileName, pkg->data);
 
-    memset(buffer, 0, BUFFER_SIZE);
-    recv(serversSockets[0], buffer, BUFFER_SIZE, 0);
-    send(clientSocket, buffer, strlen(buffer), 0);
+    if(findFile(root->files, fileName) == NULL){
+        printf("Arquivo nao encontrado");
+        memset(buffer, 0, BUFFER_SIZE);
 
-    printf("%s\n", buffer);
+        sendError(clientSocket, NORMAL, "Arquivo nao encontrado.\n");
+
+        free(pkg);
+        return -1;
+    }
+
+    package* code = fillPackage(DATA, NORMAL, "2\0", 2);
+    if(sendPackage(serversSockets[0], code, 0) <= 0){           // Envia operação pro server
+        printf("Conexao com servidor perdida.\n");
+        sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
+        free(pkg);
+        free(code);
+        return -1;
+    }
+    free(code);
+    if(sendPackage(serversSockets[0], pkg, 0) <= 0){           // envia nome do arquivo pro server
+        printf("Conexao com servidor perdida.\n");
+        sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
+        free(pkg);
+        return -1;
+    }
+    free(pkg);
+
+    memset(buffer, 0, BUFFER_SIZE);       
+
+    if(receivePackage(serversSockets[0], &pkg, 0) <= 0){            // recebe resultado de deleção
+        printf("Conexao com servidor perdida.\n");
+        sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
+        free(pkg);
+        return -1;
+    }
+
+    if(strcmp(pkg->type, DATA) != 0){
+        printf("ERRO: %s: %s", pkg->code, pkg->data);
+        sendError(clientSocket, pkg->code, pkg->data);
+        free(pkg);
+        return -1;
+    }
+
+    if(strcmp(pkg->data, "1\0")){
+        root->files = removeFile(root->files, buffer);      // Parece não estar removendo como deveria
+    }
+    free(pkg);      
+
+    pkg = fillPackage(DATA, NORMAL, "Arquivo removido.\n", strlen("Arquivo removido.\n")+1);
+    sendPackage(clientSocket, pkg, 0);                         // Envia resultado pro client
+
+    free(pkg);
 
     return 0;
 }
 
 int uploadFile(SOCKET clientSocket, folder* root){
-    char buffer[BUFFER_SIZE];
+    package* pkg;
     int packageAmount = 0;
     int i = 0;
-    printf("inserir arquivo.\n");
+    printf("inserir arquivo.\n");             
 
-    send(serversSockets[0], "3", 2, 0);
+    pkg = fillPackage(DATA, NORMAL, "3\0", 2);
+    if(sendPackage(serversSockets[0], pkg, 0) <= 0){               // envia operação pro servidor
+        printf("Conexao com servidor perdida.\n");
+        sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
+        free(pkg);
+        return -1;
+    }
+    free(pkg);
 
-    memset(buffer, 0, BUFFER_SIZE);
-    recv(clientSocket, buffer, BUFFER_SIZE, 0);   // Recebe informações do arquivo
-    send(serversSockets[0], buffer, BUFFER_SIZE, 0);
+    if(receivePackage(clientSocket, &pkg, 0) <= 0){                // Recebe informações do arquivo
+        printf("Conexao com cliente perdida.\n");
+        sendError(serversSockets[0], LOST_CONNECTION, "Conexao com client perdida.\n");
+        free(pkg);
+        return -1;
+    }
+    if(strcmp(pkg->type, ERRO) == 0){
+        printf("ERRO: %s: %s", pkg->code, pkg->data);
+        sendError(serversSockets[0], pkg->code, pkg->data);
+        free(pkg);
+        return -1;
+    }
+
+    if(sendPackage(serversSockets[0], pkg, 0) <= 0){                // envia informações do arquivo pro servidor
+        printf("Conexao com servidor perdida.\n");
+        sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
+        free(pkg);
+        return -1;
+    }                        
 
     // Tokeniza e separa as informações
-    char* token = strtok(buffer, ";");
+    char* token = strtok(pkg->data, ";");
     packageAmount = atoi(token);
 
     token = strtok(NULL, ";");
     char* fileName = malloc(sizeof(token));
     strcpy(fileName, token);
+    token = NULL;
 
-    printf("file name: %s\n", fileName);
-    printf("pkg amount: %d\n", packageAmount);
+    free(pkg);           
 
-    memset(buffer, 0, BUFFER_SIZE);
-    recv(serversSockets[0], buffer, BUFFER_SIZE, 0);
-
-    if(strcmp(buffer, "1") != 0){
-        printf("Arquivo ja existe.\n");
-        strcpy(buffer, "Erro: Arquivo ja existe.\n");
-        send(clientSocket, buffer, (int)strlen(buffer), 0);
-        return 1;
+    if(receivePackage(serversSockets[0], &pkg, 0) <= 0){                               // Recebe se o servidor pode receber o arquivo
+        printf("Conexao com servidor perdida.\n");
+        sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
+        free(pkg);
+        return -1;
     }
 
-    send(clientSocket, buffer, (int)strlen(buffer), 0);   // Envia informação que está tudo certo e pode começar a mandar os pacotes
-    memset(buffer, 0, BUFFER_SIZE);
-
-    for(i = 0; i < packageAmount; i++){
-        memset(buffer, 0, BUFFER_SIZE);
-        recv(clientSocket, buffer, BUFFER_SIZE, 0);
-        //fprintf(fptr, buffer);
-        send(serversSockets[0], buffer, BUFFER_SIZE, 0);
+    if(sendPackage(clientSocket, pkg, 0) <= 0){                // Envia informação SE está tudo certo e pode começar a mandar os pacotes
+        printf("Conexao com cliente perdida.\n");
+        sendError(serversSockets[0], LOST_CONNECTION, "Conexao com client perdida.\n");
+        free(pkg);
+        return -1;
     }
 
-    memset(buffer, 0, BUFFER_SIZE);
-    recv(serversSockets[0], buffer, BUFFER_SIZE, 0);
-    send(clientSocket, buffer, strlen(buffer), 0);
+    if(strcmp(pkg->type, ERRO) == 0){                // se não puder enviar os pacotes, termina função
+        printf("ERRO: %s: %s", pkg->code, pkg->data);
+        free(pkg);
+        return -1;
+    }
+    free(pkg);
 
-    root->files = addFile(root->files, fileName);
+    while(1){
+        if(receivePackage(clientSocket, &pkg, 0) <= 0){                   // recebe pacote do client
+            printf("Conexao com client perdida.\n");
+            sendError(serversSockets[0], LOST_CONNECTION, "Conexao com client perdida.\n");
+            free(pkg);
+            return -1;
+        }
+        if(strcmp(pkg->type, ERRO) == 0){
+            printf("ERRO: %s: %s", pkg->code, pkg->data);
+            sendError(serversSockets[0], pkg->code, pkg->data);
+            free(pkg);
+            return -1;
+        }
+
+        if(sendPackage(serversSockets[0], pkg, 0) <= 0){               // envia pacote pro servidor
+            printf("Conexao com servidor perdida.\n");
+            sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
+            free(pkg);
+            return -1;
+        }
+        if(strcmp(pkg->type, FEOF) == 0){
+            break;
+        }
+        free(pkg);
+    }
+    free(pkg);
+
+    if(receivePackage(serversSockets[0], &pkg, 0) <= 0){                   // Recebe output do servidor
+        printf("Conexao com servidor perdida.\n");
+        sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
+        free(pkg);
+        return -1;
+    }
+
+    if(sendPackage(clientSocket, pkg, 0) <= 0){               // envia output pro client
+        printf("Conexao com servidor perdida.\n");
+        sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
+        free(pkg);
+        return -1;
+    }
+
+    if(strcmp(pkg->type, DATA) == 0){
+        root->files = addFile(root->files, fileName);
+    }
+    
     free(fileName);
+    free(pkg);
 
     return 0;
 }
 
-int downloadFile(SOCKET clientSocket){
+int downloadFile(SOCKET clientSocket, folder* root){
     printf("baixar arquivo.\n");
+    package* pkg;
 
-    char buffer[BUFFER_SIZE];
-    int packageAmount = 0;
-
-    send(serversSockets[0], "4", 2, 0);
-
-    memset(buffer, 0, BUFFER_SIZE);
-    recv(clientSocket, buffer, BUFFER_SIZE, 0);   // Recebe nome do arquivo
-    send(serversSockets[0], buffer, strlen(buffer), 0);     // envia nome do arquivo pro servidor
-
-    memset(buffer, 0, BUFFER_SIZE);
-    recv(serversSockets[0], buffer, BUFFER_SIZE, 0);   // Recebe se o arquivo foi aberto
-    send(clientSocket, buffer, strlen(buffer), 0);
-
-    if(strcmp(buffer, "1") != 0){
-        printf("%s", buffer);
-        return 1;
+    if(receivePackage(clientSocket, &pkg, 0) <= 0){                // Recebe nome do arquivo
+        printf("Conexao com cliente perdida.\n");
+        sendError(serversSockets[0], LOST_CONNECTION, "Conexao com client perdida.\n");
+        free(pkg);
+        return -1;
+    }
+    if(strcmp(pkg->type, ERRO) == 0){
+        printf("ERRO: %s: %s", pkg->code, pkg->data);
+        sendError(serversSockets[0], pkg->code, pkg->data);
+        free(pkg);
+        return -1;
     }
 
-    memset(buffer, 0, BUFFER_SIZE);
-    recv(serversSockets[0], buffer, BUFFER_SIZE, 0);    //Recebe quantidade de pacotes
-    send(clientSocket, buffer, strlen(buffer), 0);      // envia quantidade de pacotes pro client
+    if(findFile(root->files, pkg->data) == NULL){                      // Procura no sistema de arquivos
+        printf("Arquivo nao encontrado");
+        sendError(clientSocket, ERRO, "Arquivo nao encontrado.\n");
 
-    packageAmount = atoi(buffer);
-
-    for(int i = 0; i <packageAmount; i++){
-        memset(buffer, 0, BUFFER_SIZE);
-        recv(serversSockets[0], buffer, BUFFER_SIZE, 0);
-        send(clientSocket, buffer, BUFFER_SIZE, 0);
+        return -1;
     }
+
+    package* code;
+    code = fillPackage(DATA, NORMAL, "4\0", 2);
+    if(sendPackage(serversSockets[0], code, 0) <= 0){               // envia operação pro servidor
+        printf("Conexao com servidor perdida.\n");
+        sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
+        free(code);
+        return -1;
+    }
+    free(code);
+
+    if(sendPackage(serversSockets[0], pkg, 0) <= 0){                // envia nome do arquivo pro servidor
+        printf("Conexao com servidor perdida.\n");
+        sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
+        free(pkg);
+        return -1;
+    }
+    free(pkg);
+
+    if(receivePackage(serversSockets[0], &pkg, 0) <= 0){                               // Recebe se o arquivo foi aberto
+        printf("Conexao com servidor perdida.\n");
+        sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
+        free(pkg);
+        return -1;
+    }
+
+    if(sendPackage(clientSocket, pkg, 0) <= 0){                // Envia se o arquivo foi aberto
+        printf("Conexao com cliente perdida.\n");
+        sendError(serversSockets[0], LOST_CONNECTION, "Conexao com client perdida.\n");
+        free(pkg);
+        return -1;
+    }
+
+    if(strcmp(pkg->type, ERRO) == 0){                // se deu erro na abertura do arquivo, encerra a função
+        printf("ERRO: %s: %s", pkg->code, pkg->data);
+        free(pkg);
+        return -1;
+    }
+    free(pkg);
+
+    while(1){
+        if(receivePackage(serversSockets[0], &pkg, 0) <= 0){                   // recebe pacote do servidor
+            printf("Conexao com client perdida.\n");
+            sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
+            free(pkg);
+            return -1;
+        }
+        if(strcmp(pkg->type, ERRO) == 0){
+            printf("ERRO: %s: %s", pkg->code, pkg->data);
+            sendError(clientSocket, pkg->code, pkg->data);
+            free(pkg);
+            return -1;
+        }
+
+        if(sendPackage(clientSocket, pkg, 0) <= 0){               // envia pacote pro client
+            printf("Conexao com client perdida.\n");
+            sendError(serversSockets[0], LOST_CONNECTION, "Conexao com client perdida.\n");
+            free(pkg);
+            return -1;
+        }
+
+        if(strcmp(pkg->type, FEOF) == 0){
+            break;
+        }
+        free(pkg);
+    }
+    free(pkg);
 
     printf("Download concluido.\n");
-    
     return 0;
 }
 
