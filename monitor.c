@@ -175,35 +175,48 @@ int serverAccept(SOCKET serverListenSocket){
 }
 
 file* addFile(file* root, char* name){
+    if(name == NULL) return root;
+
+    file* newFile = malloc(sizeof(file));
+    char* newFileName = malloc(strlen(name)+1);
+    strcpy(newFileName, name);
+
+    newFile->name = newFileName;
+    newFile->left = NULL;
+    newFile->right = NULL;
+
     if(root == NULL){
-        file* newFile = malloc(sizeof(file));
-
-        if(newFile == NULL){
-            printf("Arquivo invalido por algum motivo.\n");
-            return NULL;
-        }
-
-        char* newFileName = malloc(strlen(name));
-        strcpy(newFileName, name);
-
-        newFile->name = newFileName;
-        newFile->left = NULL;
-        newFile->right = NULL;
-
         return newFile;
     }
 
-    int cmp = strcmp(name, root->name);
-    if(cmp < 0){
-        root->left = addFile(root->left, name);
-    }
-    else if(cmp > 0){
-        root->right = addFile(root->right, name);
-    }
-    else{
-        printf("arquivo com esse nome ja existe");
+    file* temp = root;
+    file* lastFile;
+
+    while(temp != NULL){
+        if(strcmp(newFileName, temp->name) < 0){
+            lastFile = temp;
+            temp = temp->left;
+            continue;
+        }
+        else if(strcmp(newFileName, temp->name) > 0){
+            lastFile = temp;
+            temp = temp->right;
+            continue;
+        }
+        else if(strcmp(newFileName, temp->name) == 0){
+            printf("arquivo ja existe na arvore.\n");
+            return root;
+        }
     }
 
+    if(strcmp(newFileName, lastFile->name) < 0){
+        lastFile->left = newFile;
+        return root;
+    }
+    else if(strcmp(newFileName, lastFile->name) > 0){
+        lastFile->right = newFile;
+        return root;
+    }
     return root;
 }
 
@@ -293,37 +306,85 @@ folder* findFolder(folder* root, char* name){
 file* removeFile(file* root, char* name){
     if(root == NULL) return NULL;
 
-    int cmp = strcmp(name, root->name);
+    BOOLEAN isLeft;
 
-    if(cmp < 0){
-        return removeFile(root->left, name);
-    }
-    else if(cmp > 0){
-        return removeFile(root->right, name);
-    }
-    else{
-        if(root->left == NULL){
-            file* temp = root->right;
-            free(root->name);
-            free(root);
-            return temp;
+    file* remove = root;
+    file* parent = NULL;
+
+    
+    while(remove->left != NULL || remove->right != NULL){
+        if(strcmp(name, remove->name) < 0){
+            parent = remove;
+            remove = remove->left;
+            isLeft = TRUE;
+            continue;
         }
-        else if(root->right == NULL){
-            file* temp = root->left;
-            free(root->name);
-            free(root);
-            return temp;
+        else if(strcmp(name, remove->name) > 0){
+            parent = remove;
+            remove = remove->right;
+            isLeft = FALSE;
+            continue;
+        }
+        break;
+    }
+
+    if(parent == NULL || (remove->left != NULL && remove->right != NULL)){
+        //é a raiz
+        if(remove->left == NULL){
+            file* newRoot = remove->right;
+            free(remove->name);
+            free(remove);
+            return newRoot;
+        }
+        else if(remove->right == NULL){
+            file* newRoot = remove->left;
+            free(remove->name);
+            free(remove);
+            return newRoot;
+        }
+
+        file* leftFile = remove->left;
+        file* temp = remove->left;
+        while(temp->right != NULL){
+            temp = temp->right;
+        }
+        leftFile->right = temp->left;
+
+        if(leftFile == temp){
+            remove->left = leftFile->left;
+        }
+
+        // conteudo de temp --> remove
+        free(remove->name);
+        remove->name = temp->name;
+        temp->name = NULL;
+        free(temp);
+
+        return root;
+    }
+    else if(remove->left == NULL){       // tem o da direita
+        if(isLeft == TRUE){
+            parent->left = remove->right;
         }
         else{
-            file* child = root->right;
-            while(child->left != NULL){
-                child = child->left;
-            }
-            free(root->name);
-            root->name = child->name;       // Passar todas a informações de arquivo pro novo cara
-            root->right = removeFile(root->right, child->name);
+            parent->right = remove->right;
         }
+        free(remove->name);
+        free(remove);
+        return root;
     }
+    else if(remove->right == NULL){     //tem o da esquerda
+        if(isLeft == TRUE){
+            parent->left = remove->left;
+        }
+        else{
+            parent->right = remove->left;
+        }
+        free(remove->name);
+        free(remove);
+        return root;
+    }
+
     return root;
 }
 
@@ -350,73 +411,115 @@ void freeFolders(folder* root){
 folder* removeFolder(folder* root, char* name){
     if(root == NULL) return NULL;
 
-    int cmp = strcmp(name, root->name);
+    BOOLEAN isLeft;
 
-    if(cmp < 0){
-        return removeFolder(root->left, name);
-    }
-    else if(cmp > 0){
-        return removeFolder(root->right, name);
-    }
-    else{
-        if(root->left == NULL){
-            folder* temp = root->right;
+    folder* remove = root;
+    folder* parent = NULL;
 
-            freeFiles(root->files);
-            freeFolders(root->subFolders);
-
-            free(root->name);
-            free(root);
-            return temp;
+    
+    while(remove->left != NULL || remove->right != NULL){
+        if(strcmp(name, remove->name) < 0){
+            parent = remove;
+            remove = remove->left;
+            isLeft = TRUE;
+            continue;
         }
-        else if(root->right == NULL){
-            folder* temp = root->left;
+        else if(strcmp(name, remove->name) > 0){
+            parent = remove;
+            remove = remove->right;
+            isLeft = FALSE;
+            continue;
+        }
+        break;
+    }
 
-            freeFiles(root->files);
-            freeFolders(root->subFolders);
+    if(parent == NULL || (remove->left != NULL && remove->right != NULL)){
+        //é a raiz
+        if(remove->left == NULL){
+            folder* newRoot = remove->right;
+            free(remove->name);
+            free(remove);
+            return newRoot;
+        }
+        else if(remove->right == NULL){
+            folder* newRoot = remove->left;
+            free(remove->name);
+            free(remove);
+            return newRoot;
+        }
 
-            free(root->name);
-            free(root);
-            return temp;
+        folder* leftFolder = remove->left;
+        folder* temp = remove->left;
+        while(temp->right != NULL){
+            temp = temp->right;
+        }
+        leftFolder->right = temp->left;
+
+        if(leftFolder == temp){
+            remove->left = leftFolder->left;
+        }
+
+        // conteudo de temp --> remove
+        free(remove->name);
+        remove->name = temp->name;
+        // Parent não é necessários, todos têm o mesmo parent por estarem na mesma subfolder
+        temp->name = NULL;
+        free(temp);
+
+        return root;
+    }
+    else if(remove->left == NULL){       // tem o da direita
+        if(isLeft == TRUE){
+            parent->left = remove->right;
         }
         else{
-            folder* child = root->right;
-            while(child->left != NULL){
-                child = child->left;
-            }
-            free(root->name);
-            root->name = child->name;
-            root->right = removeFolder(root->right, child->name);
+            parent->right = remove->right;
         }
+        free(remove->name);
+        free(remove);
+        return root;
     }
+    else if(remove->right == NULL){     //tem o da esquerda
+        if(isLeft == TRUE){
+            parent->left = remove->left;
+        }
+        else{
+            parent->right = remove->left;
+        }
+        free(remove->name);
+        free(remove);
+        return root;
+    }
+    
     return root;
 }
 
 void saveFiles(file* root, FILE* fptr){
-
     if(root == NULL) return;
 
     fprintf(fptr, "%s:", root->name);
 
+    saveFiles(root->left, fptr);
     saveFiles(root->right, fptr);
 }
 
 void saveFolders(folder* root, FILE* fptr){
     if(root == NULL) return;
 
-    saveFolders(root->left, fptr);
-
     fprintf(fptr, "%s<", root->name);
-
     saveFiles(root->files,fptr);
     fprintf(fptr, "\n");
+
     saveFolders(root->subFolders, fptr);
     fprintf(fptr, ">\n", root->name);
+
+    saveFolders(root->left, fptr);
+    
     saveFolders(root->right, fptr);
 }
 
-int memSave(folder* root, char* path){
-    FILE* fptr = fopen(path, "wb");
+int memSave(folder* root, char* path){      // Alterar para salvar em um arquivo temporário antes, e então substituir o original
+    FILE* fptr = fopen(path, "wb");         // Isso é  pra caso o monitor seja interrompido durante o salvamento, não perca tudo.
 
     saveFolders(root, fptr);
 
@@ -622,8 +725,8 @@ int deleteFile(SOCKET clientSocket, folder* root){
         return -1;
     }
 
-    if(strcmp(pkg->data, "1\0")){
-        root->files = removeFile(root->files, buffer);      // Parece não estar removendo como deveria
+    if(strcmp(pkg->data, "1\0") == 0){
+        root->files = removeFile(root->files, fileName);
     }
     free(pkg);      
 
