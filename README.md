@@ -11,6 +11,19 @@
 
     dw [nome] - download
 
+    cf [nome] - criar pasta
+
+    dlf [nome] - deletar pasta
+
+    go [nome] - entrar na pasta
+
+    bck - voltar pasta
+
+    cpy [nome] [caminho] - copiar arquivo do diretório atual para o caminho dado
+
+    cpf [nome] [caminho] - copiar pasta do diretório atual para o caminho dado
+
+
 
 
 (Compilar com -lws2_32)

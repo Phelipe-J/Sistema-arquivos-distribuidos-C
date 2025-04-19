@@ -1,4 +1,4 @@
-#include "fileStructure.h"
+#include "communication.h"
 
 //OBS MONITOR_IP foi definido em info.h
 
@@ -20,6 +20,13 @@ int listFiles(char*);
 int deleteFile(char*);
 int uploadFile(char*);
 int downloadFile(char*);
+int downloadFolder(char*);
+int goInFolder(char*);
+int goBackFolder(char*);
+int createFolder(char*);
+int deleteFolder(char*);
+int copyFile(char*);
+int copyFolder(char*);
 
 BOOL WINAPI consoleHandler(DWORD signal){
     if(signal == CTRL_CLOSE_EVENT){
@@ -42,15 +49,24 @@ int communication(){
         {"del", deleteFile},
         {"up", uploadFile},
         {"dw", downloadFile},
+        {"dwf", downloadFolder},
+        {"go", goInFolder},
+        {"bck", goBackFolder},
+        {"cf", createFolder},
+        {"dlf", deleteFolder},
+        {"cp", copyFile},
+        {"cpf", copyFolder},
         {NULL, NULL}
     };
 
     while(1){
+        fflush(stdout);
         if(fgets(commandBuffer, BUFFER_SIZE, stdin)){
+            if(strlen(commandBuffer) <= 1) continue;
             commandBuffer[strcspn(commandBuffer, "\n")] = '\0';
 
             char* commandInput = strtok(commandBuffer, " ");
-            char* argument = strtok(NULL, " ");
+            char* argument = strtok(NULL, "");
 
             command* chosenCommand = NULL;
 
@@ -73,10 +89,10 @@ int communication(){
 }
 
 int listFiles(char* argument){
+    char c[3];
+    sprintf(c, "%d", LS);
 
-    printf("list\n");
-
-    package* code = fillPackage(DATA, NORMAL, "1\0", 2);
+    package* code = fillPackage(DATA, NORMAL, c, strlen(c)+1);
 
     sendPackage(connectionSocket, code, 0);
     free(code);
@@ -90,11 +106,13 @@ int listFiles(char* argument){
     package* msg;
     if(receivePackage(connectionSocket, &msg, 0) <= 0){
         printf("Conexao perdida com o servidor.\n");
+        free(msg);
         return -1;
     }
     
     if(strcmp(msg->type, DATA) != 0){
         printf("Erro %s: $s", msg->code, msg->data);
+        free(msg);
         return -1;
     }
 
@@ -107,7 +125,10 @@ int listFiles(char* argument){
 }
 
 int deleteFile(char* fileName){
-    package* code = fillPackage(DATA, NORMAL, "2\0", 2);
+    char c[3];
+    sprintf(c, "%d", DEL);
+
+    package* code = fillPackage(DATA, NORMAL, c, strlen(c)+1);
 
     sendPackage(connectionSocket, code, 0);                // envia operação
     free(code);
@@ -135,7 +156,10 @@ int deleteFile(char* fileName){
 }
 
 int uploadFile(char* filePath){
-    package* code = fillPackage(DATA, NORMAL, "3\0", 2);
+    char c[3];
+    sprintf(c, "%d", UP);
+
+    package* code = fillPackage(DATA, NORMAL, c, strlen(c)+1);
     sendPackage(connectionSocket, code, 0);                // envia operação
     free(code);
 
@@ -146,18 +170,11 @@ int uploadFile(char* filePath){
     fileName = strrchr(filePath, '\\');
     fileName++;
 
-    printf("file name: %s\n", fileName);
-
     FILE* fptr = fopen(filePath, "rb");
 
     fseek(fptr, 0L, SEEK_END);
-    packageAmount = ceil((float)ftell(fptr)/BUFFER_SIZE);           // FUnções inúteis remover depois
-    char buffer[DATA_SIZE];
-    memset(buffer, 0, DATA_SIZE);
 
-    sprintf(buffer, "%d;%s", packageAmount, fileName);
-
-    pkg = fillPackage(DATA, NORMAL, buffer, strlen(buffer)+1);
+    pkg = fillPackage(DATA, NORMAL, fileName, strlen(fileName)+1);
 
     if(sendPackage(connectionSocket, pkg, 0) <= 0){                 // Envia informações do arquivo
         printf("Conexao com servidor perdida.\n");
@@ -182,6 +199,7 @@ int uploadFile(char* filePath){
 
     free(pkg);
 
+    char buffer[DATA_SIZE];
     while(!feof(fptr)){                                 // Envia os pacotes
         memset(buffer, 0, DATA_SIZE);
         int dataSize = fread(buffer, 1, DATA_SIZE, fptr);
@@ -234,7 +252,10 @@ int downloadFile(char* fileName){
         return -1;
     }
 
-    package* code = fillPackage(DATA, NORMAL, "4\0", 2);
+    char c[3];
+    sprintf(c, "%d", DW);
+
+    package* code = fillPackage(DATA, NORMAL, c, strlen(c)+1);
     sendPackage(connectionSocket, code, 0);                // envia operação
     free(code);
 
@@ -279,6 +300,7 @@ int downloadFile(char* fileName){
         }
 
         if(strcmp(pkg->type, FEOF) == 0){
+            free(pkg);
             break;
         }
 
@@ -289,6 +311,343 @@ int downloadFile(char* fileName){
 
     printf("Download concluido.\n");
 
+    return 0;
+}
+
+int downloadFolder(char* folderName){
+    char c[3];
+    sprintf(c, "%d", DWF);
+
+    package* code = fillPackage(DATA, NORMAL, c, strlen(c)+1);
+    sendPackage(connectionSocket, code, 0);                // envia operação
+    free(code);
+
+    package* pkg;
+    pkg = fillPackage(DATA, NORMAL, folderName, strlen(folderName)+1);
+    sendPackage(connectionSocket, pkg, 0);                      // envia nome da pasta pro monitor
+    free(pkg);
+
+    if(receivePackage(connectionSocket, &pkg, 0) <= 0){             // recebe se pasta não existe ou quantidade de arquivos
+        printf("Conexao com servidor perdida.\n");
+        free(pkg);
+        return -1;
+    }
+
+    if(strcmp(pkg->type, ERRO) == 0){
+        printf("ERRO: %s: %s", pkg->code, pkg->data);
+        free(pkg);
+        return -1;
+    }
+
+    int netInt = 0;
+    memcpy(&netInt, pkg->data, sizeof(int));
+
+    int fileAmount = ntohl(netInt);
+
+    char path[BUFFER_SIZE];
+    strcpy(path, PATH);
+    strcat(path, folderName);
+
+    free(pkg);
+
+    int check = mkdir(path);                    // Criar pasta aqui
+
+    if(check < 0){
+        printf("Pasta nao pode ser criada.\n");
+        sendError(connectionSocket, UNKNOWN_ERROR, "Client nao conseguiu criar pasta.\n");
+        return -1;
+    }
+
+    pkg = fillPackage(DATA, NORMAL, "1\0", 2);
+    sendPackage(connectionSocket, pkg, 0);
+    free(pkg);
+
+    FILE* fptr;
+    char* filePath;
+
+    for(int i = 0; i < fileAmount; i++){
+        if(receivePackage(connectionSocket, &pkg, 0) <= 0){             // recebe nome do arquivo
+            printf("Conexao com servidor perdida.\n");
+            free(pkg);
+            return -1;
+        }
+
+        if(strcmp(pkg->type, ERRO) == 0){
+            printf("ERRO: %s: %s", pkg->code, pkg->data);
+            free(pkg);
+            return -1;
+        }
+
+        filePath = malloc(strlen(pkg->data) + strlen(path) + 2);
+        strcpy(filePath, path);
+        strcat(filePath, "\\");
+        strcat(filePath, pkg->data);
+
+        fptr = fopen(filePath, "wb");
+        free(pkg);
+
+        // receber arquivo
+        while(1){
+            int result = receivePackage(connectionSocket, &pkg, 0);
+            if(result <= 0){
+                printf("Conexao com monitor perdida.\n");
+                fclose(fptr);
+                remove(filePath);
+                free(pkg);
+                free(filePath);
+                return -1;
+            }
+            if(strcmp(pkg->type, ERRO) == 0){
+                printf("ERRO: %s: %s", pkg->code, pkg->data);
+                fclose(fptr);
+                remove(filePath);
+                free(pkg);
+                free(filePath);
+                return -1;
+            }
+
+            if(strcmp(pkg->type, FEOF) == 0){
+                break;
+            }  
+
+            fwrite(pkg->data, 1, pkg->dataSize, fptr);
+
+            free(pkg);
+        }
+
+        fclose(fptr);
+        free(pkg);
+        free(filePath);
+
+        pkg = fillPackage(DATA, NORMAL, "Arquivo recebindo.\n", strlen("Arquivo recebindo.\n")+1);
+        sendPackage(connectionSocket, pkg, 0);
+        free(pkg);
+    }
+    
+    printf("Download Concluido.\n");
+
+    return 0;
+}
+
+int goInFolder(char* folderName){
+    char c[3];
+    sprintf(c, "%d", GO);
+
+    package* pkg;
+
+    pkg = fillPackage(DATA, NORMAL, c, strlen(c)+1);
+    if(sendPackage(connectionSocket, pkg, 0) <= 0){
+        printf("Conexao com servidor perdida.\n");
+        free(pkg);
+        return -1;
+    }
+    free(pkg);
+
+    pkg = fillPackage(DATA, NORMAL, folderName, strlen(folderName)+1);
+    if(sendPackage(connectionSocket, pkg, 0) <= 0){
+        printf("Conexao com servidor perdida.\n");
+        free(pkg);
+        return -1;
+    }
+    free(pkg);
+
+    return 0;
+}
+
+int goBackFolder(char* argument){
+    char c[3];
+    sprintf(c, "%d", BCK);
+
+    package* pkg;
+
+    pkg = fillPackage(DATA, NORMAL, c, strlen(c)+1);
+    if(sendPackage(connectionSocket, pkg, 0) <= 0){
+        printf("Conexao com servidor perdida.\n");
+        free(pkg);
+        return -1;
+    }
+    free(pkg);
+
+    return 0;
+}
+
+int createFolder(char* folderName){
+    package* pkg;
+    char c[3];
+    sprintf(c, "%d", CF);
+
+    pkg = fillPackage(DATA, NORMAL, c, strlen(c)+1);
+    if(sendPackage(connectionSocket, pkg, 0) <= 0){
+        printf("Conexao com servidor perdida.\n");
+        free(pkg);
+        return -1;
+    }
+    free(pkg);
+
+    pkg = fillPackage(DATA, NORMAL, folderName, strlen(folderName)+1);
+    if(sendPackage(connectionSocket, pkg, 0) <= 0){
+        printf("Conexao com servidor perdida.\n");
+        free(pkg);
+        return -1;
+    }
+    free(pkg);
+
+    if(receivePackage(connectionSocket, &pkg, 0) <= 0){
+        printf("Conexao com servidor perdida.\n");
+        free(pkg);
+        return -1;
+    }
+
+    if(strcmp(pkg->type, ERRO) == 0){
+        printf("ERRO: %s: %s\n", pkg->code, pkg->data);
+        free(pkg);
+        return -1;
+    }
+
+    printf("%s", pkg->data);
+    free(pkg);
+    return 0;
+}
+
+int deleteFolder(char* folderName){
+    package* pkg;
+    char c[3];
+    sprintf(c, "%d", DLF);
+
+    pkg = fillPackage(DATA, NORMAL, c, strlen(c)+1);
+    if(sendPackage(connectionSocket, pkg, 0) <= 0){             // Envia operação pro monitor
+        printf("Conexao com servidor perdida.\n");
+        free(pkg);
+        return -1;
+    }
+    free(pkg);
+
+    pkg = fillPackage(DATA, NORMAL, folderName, strlen(folderName)+1);
+    if(sendPackage(connectionSocket, pkg, 0) <= 0){
+        printf("Conexao com servidor perdida.\n");
+        free(pkg);
+        return -1;
+    }
+    free(pkg);
+
+    if(receivePackage(connectionSocket, &pkg, 0) <= 0){
+        printf("Conexao com servidor perdida.\n");
+        free(pkg);
+        return -1;
+    }
+
+    if(strcmp(pkg->type, ERRO) == 0){
+        printf("ERRO: %s: %s\n", pkg->code, pkg->data);
+        free(pkg);
+        return -1;
+    }
+
+    printf("%s", pkg->data);
+    free(pkg);
+    return 0;
+}
+
+int copyFile(char* arguments){
+    char fileName[DATA_SIZE];
+    char destinationFolder[DATA_SIZE];
+
+    char* token = strtok(arguments, " ");
+    strcpy(fileName, token);
+
+    token = strtok(NULL, "");
+    strcpy(destinationFolder, token);
+
+    package* pkg;
+    char c[3];
+    sprintf(c, "%d", CP);
+
+    pkg = fillPackage(DATA, NORMAL, c, strlen(c)+1);
+    if(sendPackage(connectionSocket, pkg, 0) <= 0){             // Envia operação pro monitor
+        printf("Conexao com servidor perdida.\n");
+        return -1;
+    }
+    free(pkg);
+
+    pkg = fillPackage(DATA, NORMAL, fileName, strlen(fileName)+1);
+    if(sendPackage(connectionSocket, pkg, 0) <= 0){             // Envia nome do arquivo
+        printf("Conexao com servidor perdida.\n");
+        return -1;
+    }
+    free(pkg);
+
+    pkg = fillPackage(DATA, NORMAL, destinationFolder, strlen(destinationFolder)+1);
+    if(sendPackage(connectionSocket, pkg, 0) <= 0){             // Envia caminho da pasta
+        printf("Conexao com servidor perdida.\n");
+        return -1;
+    }
+    free(pkg);
+
+    if(receivePackage(connectionSocket, &pkg, 0) <= 0){         // Recebe resultado da operação
+        printf("Conexao com servidor perdida.\n");
+        free(pkg);
+        return -1;
+    }
+
+    if(strcmp(pkg->type, ERRO) == 0){
+        printf("ERRO: %s: %s\n", pkg->code, pkg->data);
+        free(pkg);
+        return -1;
+    }
+
+    printf("%s", pkg->data);
+    free(pkg);
+    return 0;
+}
+
+int copyFolder(char* arguments){
+    char sourceFolder[DATA_SIZE];
+    char destinationFolder[DATA_SIZE];
+
+    char* token = strtok(arguments, " ");
+    strcpy(sourceFolder, token);
+
+    token = strtok(NULL, "");
+    strcpy(destinationFolder, token);
+
+    package* pkg;
+    char c[3];
+    sprintf(c, "%d", CPF);
+
+    pkg = fillPackage(DATA, NORMAL, c, strlen(c)+1);
+    if(sendPackage(connectionSocket, pkg, 0) <= 0){             // Envia operação pro monitor
+        printf("Conexao com servidor perdida.\n");
+        return -1;
+    }
+    free(pkg);
+
+    pkg = fillPackage(DATA, NORMAL, sourceFolder, strlen(sourceFolder)+1);
+    if(sendPackage(connectionSocket, pkg, 0) <= 0){             // Envia nome da pasta que vai ser copiado pro monitor
+        printf("Conexao com servidor perdida.\n");
+        return -1;
+    }
+    free(pkg);
+
+    pkg = fillPackage(DATA, NORMAL, destinationFolder, strlen(destinationFolder)+1);
+    if(sendPackage(connectionSocket, pkg, 0) <= 0){             // Envia caminho da pasta onde vai ficar a cópia
+        printf("Conexao com servidor perdida.\n");
+        return -1;
+    }
+    free(pkg);
+
+    if(receivePackage(connectionSocket, &pkg, 0) <= 0){         // Recebe resultado da operação
+        printf("Conexao com servidor perdida.\n");
+        free(pkg);
+        return -1;
+    }
+
+    if(strcmp(pkg->type, ERRO) == 0){
+        printf("ERRO: %s: %s\n", pkg->code, pkg->data);
+        free(pkg);
+        return -1;
+    }
+
+    printf("%s", pkg->data);
+    free(pkg);
     return 0;
 }
 

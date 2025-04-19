@@ -1,4 +1,4 @@
-#include "fileStructure.h"
+#include "communication.h"
 
 #define CLIENTS_PORT "6669"
 #define SERVERS_PORT "6670"
@@ -12,25 +12,22 @@ SOCKET serversSockets[MAX_SERVER_AMOUNT];
 int serverAmount = 0;
 
 int listFiles(SOCKET, folder*);
-int deleteFile(SOCKET, folder*);
+int deleteFileCommunication(SOCKET, folder*);
+int deleteFile(SOCKET, folder*, char*);
 int uploadFile(SOCKET, folder*);
 int downloadFile(SOCKET, folder*);
+int downloadFolder(SOCKET, folder*);
+folder* goInFolder(SOCKET, folder*);
+int createFolder(SOCKET, folder*);
+int deleteFolder(SOCKET, folder*);
+int copyFile(SOCKET, folder*, folder*);
+int copyFolder(SOCKET, folder*, folder*);
 
-file* addFile(file*, char*);
-folder* addFolder(folder*, char*, folder*);
-file* findFile(file*, char*);
-folder* findFolder(folder*, char*);
 file* removeFile(file*, char*);
-void freeFiles(file*);
-void freeFolders(folder*);
-folder* removeFolder(folder*, char*);
-void saveFiles(file*, FILE*);
-void saveFolders(folder*, FILE*);
-int memSave(folder*, char*);
-char* getLine(FILE*);
-folder* memLoad(FILE*);
-void getFiles(file*, char*);
-void getFolders(folder*, char*);
+void freeFiles(file**, SOCKET, folder*);
+void freeFolders(folder*, SOCKET);
+BOOL removeFolder(folder*, char*, SOCKET);
+folder* removeFolderCore(folder*, char*, BOOL*, SOCKET);
 
 unsigned __stdcall client_handler(void *arg) {      // Thread cliente
     SOCKET clientSocket = (SOCKET)(size_t)arg;
@@ -78,26 +75,52 @@ unsigned __stdcall client_handler(void *arg) {      // Thread cliente
 
             switch (opcode)
             {
-            case 1:
+            case LS:
                 listFiles(clientSocket, currentFolder);
                 break;
 
-            case 2:
-                deleteFile(clientSocket, currentFolder);
+            case DEL:
+                deleteFileCommunication(clientSocket, currentFolder);
                 memSave(root, path);
                 break;
 
-            case 3:
+            case UP:
                 uploadFile(clientSocket, currentFolder);
                 memSave(root, path);
                 break;
 
-            case 4:
+            case DW:
                 downloadFile(clientSocket, currentFolder);
                 break;
-                    
-            case 5:
 
+            case CF:
+                createFolder(clientSocket, currentFolder);
+                memSave(root, path);
+                break;
+
+            case DLF:
+                deleteFolder(clientSocket, currentFolder);
+                memSave(root, path);
+                break;
+
+            case GO:                     // Entrar em pasta
+                currentFolder = goInFolder(clientSocket, currentFolder);
+                break;
+
+            case BCK:                     //Voltar pasta
+                currentFolder = getParentFolder(currentFolder);
+                break;
+
+            case DWF:
+                downloadFolder(clientSocket, currentFolder);
+                break;
+
+            case CP:
+                copyFile(clientSocket, currentFolder, root);
+                break;
+            
+            case CPF:
+                copyFolder(clientSocket, currentFolder, root);
                 break;
             default:
                 printf("Codigo invalido.\n");
@@ -174,133 +197,624 @@ int serverAccept(SOCKET serverListenSocket){
     return 0;
 }
 
-file* addFile(file* root, char* name){
-    if(name == NULL) return root;
+int listFiles(SOCKET clientSocket, folder* root){
+    printf("listar arquivos.\n");
 
-    file* newFile = malloc(sizeof(file));
-    char* newFileName = malloc(strlen(name)+1);
-    strcpy(newFileName, name);
+    int packageAmount = 0;
+    char buffer[DATA_SIZE];
+    memset(buffer, 0, DATA_SIZE);
 
-    newFile->name = newFileName;
-    newFile->left = NULL;
-    newFile->right = NULL;
+    // Fazer algo pra caso seja maior que o buffer ????
+    sprintf(buffer, "Pasta: %s\n\n|Arquivos|:\n", root->name);
+    getFiles(root->files, buffer);
+    strcat(buffer, "\n|Pastas|:\n");
+    getFolders(root->subFolders, buffer);
 
-    if(root == NULL){
-        return newFile;
+    package* pkg = fillPackage(DATA, NORMAL, buffer, strlen(buffer)+1);
+
+    sendPackage(clientSocket, pkg, 0);
+
+    free(pkg);
+
+    printf("list executado.\n");
+
+    return 0;
+}
+
+int deleteFileCommunication(SOCKET clientSocket, folder* root){
+    package* pkg;
+
+    if(receivePackage(clientSocket, &pkg, 0) <= 0){        // Recebe informações do arquivo (nome)
+        printf("Conexao perdida com o client.\n");
+        sendError(serversSockets[0], LOST_CONNECTION, "Conexao perdida com o client.\n");
+        free(pkg);
+        return -1;
     }
 
-    file* temp = root;
-    file* lastFile;
+    if(strcmp(pkg->type, ERRO) == 0){       // DEU ERRO
+        printf("ERRO: %s: %s", pkg->code, pkg->data);
+        sendError(serversSockets[0], pkg->code, pkg->data);
+        free(pkg);
+        return -1;
+    }
 
-    while(temp != NULL){
-        if(strcmp(newFileName, temp->name) < 0){
-            lastFile = temp;
-            temp = temp->left;
-            continue;
+    int result = deleteFile(clientSocket, root, pkg->data);
+
+    free(pkg);
+
+    if(result < 0){
+        sendError(clientSocket, UNKNOWN_ERROR, "Falha na remocao.\n");
+        return -1;
+    }
+
+    pkg = fillPackage(DATA, NORMAL, "Arquivo removido.\n", strlen("Arquivo removido.\n")+1);
+    sendPackage(clientSocket, pkg, 0);                         // Envia resultado pro client
+    free(pkg);
+    
+    return 0;
+}
+
+int deleteFile(SOCKET clientSocket, folder* root, char* name){
+    package* pkg;
+    
+    printf("remover arquivo.\n");
+
+    if(findFile(root->files, name) == NULL){
+        printf("Arquivo nao encontrado");
+        sendError(clientSocket, NORMAL, "Arquivo nao encontrado.\n");
+        return -1;
+    }
+
+    int pathSize = 0;
+    char* namePath = getFullFolderPath(root, &pathSize);
+
+    if(pathSize < (strlen(namePath) + strlen(name) + 2)){
+        namePath = realloc(namePath, strlen(namePath) + strlen(name) + 2);
+    }
+
+    strcat(namePath, "\\");
+    strcat(namePath, name);
+
+    unsigned long pathHash = hash(namePath);
+    free(namePath);
+    char namePathSend[256];
+    sprintf(namePathSend, "%lu.dat", pathHash);
+
+    root->files = removeFile(root->files, name);
+
+    package* code;
+    char c[3];
+    sprintf(c, "%d", DEL);
+    code = fillPackage(DATA, NORMAL, c, strlen(c)+1);
+    if(sendPackage(serversSockets[0], code, 0) <= 0){                               // envia operação pro servidor
+        printf("Conexao com servidor perdida.\n");
+        sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
+        free(code);
+        return -1;
+    }
+    free(code);
+
+    
+    pkg = fillPackage(DATA, NORMAL, namePathSend, strlen(namePathSend)+1);
+    if(sendPackage(serversSockets[0], pkg, 0) <= 0){           // envia nome do arquivo pro server
+        printf("Conexao com servidor perdida.\n");
+        sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
+        free(pkg);
+        return -1;
+    }
+    free(pkg);     
+
+    if(receivePackage(serversSockets[0], &pkg, 0) <= 0){            // recebe resultado de deleção
+        printf("Conexao com servidor perdida.\n");
+        sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
+        free(pkg);
+        return -1;
+    }
+
+    if(strcmp(pkg->data, ERRO) == 0){
+        root->files = addFile(root->files, name);       // adiciona o arquivo de volta em caso de erro no servidor
+        printf("ERRO: %s: %s", pkg->code, pkg->data);
+        sendError(clientSocket, pkg->code, pkg->data);
+        free(pkg);
+        return -1;
+    }
+    free(pkg);      
+
+    pkg = fillPackage(DATA, NORMAL, "Arquivo removido.\n", strlen("Arquivo removido.\n")+1);
+    sendPackage(clientSocket, pkg, 0);                         // Envia resultado pro client
+
+    free(pkg);
+
+    return 0;
+}
+
+int uploadFile(SOCKET clientSocket, folder* root){
+    package* pkg;
+    int packageAmount = 0;
+    int i = 0;
+    printf("inserir arquivo.\n");             
+
+    char c[3];
+    sprintf(c, "%d", UP);
+    pkg = fillPackage(DATA, NORMAL, c, strlen(c)+1);
+    if(sendPackage(serversSockets[0], pkg, 0) <= 0){                               // envia operação pro servidor
+        printf("Conexao com servidor perdida.\n");
+        sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
+        free(pkg);
+        return -1;
+    }
+    free(pkg);
+
+    if(receivePackage(clientSocket, &pkg, 0) <= 0){                // Recebe informações do arquivo (nome)
+        printf("Conexao com cliente perdida.\n");
+        sendError(serversSockets[0], LOST_CONNECTION, "Conexao com client perdida.\n");
+        free(pkg);
+        return -1;
+    }
+    if(strcmp(pkg->type, ERRO) == 0){
+        printf("ERRO: %s: %s", pkg->code, pkg->data);
+        sendError(serversSockets[0], pkg->code, pkg->data);
+        free(pkg);
+        return -1;
+    }
+
+    char fileName[DATA_SIZE];
+    strcpy(fileName, pkg->data);
+
+    int pathSize = 0;
+    char* namePath = getFullFolderPath(root, &pathSize);
+
+    if(pathSize < (strlen(namePath) + strlen(fileName) + 2)){
+        namePath = realloc(namePath, strlen(namePath) + strlen(fileName) + 2);
+    }
+
+    strcat(namePath, "\\");
+    strcat(namePath, fileName);
+
+    unsigned long pathHash = hash(namePath);
+    free(namePath);
+    char namePathSend[256];
+    sprintf(namePathSend, "%lu.dat", pathHash);
+
+    free(pkg);
+
+    // send hash
+    pkg = fillPackage(DATA, NORMAL, namePathSend, strlen(namePathSend)+1);
+
+    if(sendPackage(serversSockets[0], pkg, 0) <= 0){                // envia informações do arquivo pro servidor
+        printf("Conexao com servidor perdida.\n");
+        sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
+        free(pkg);
+        return -1;
+    }                        
+
+    free(pkg);           
+
+    if(receivePackage(serversSockets[0], &pkg, 0) <= 0){                               // Recebe se o servidor pode receber o arquivo
+        printf("Conexao com servidor perdida.\n");
+        sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
+        free(pkg);
+        return -1;
+    }
+
+    if(sendPackage(clientSocket, pkg, 0) <= 0){                // Envia informação SE está tudo certo e pode começar a mandar os pacotes
+        printf("Conexao com cliente perdida.\n");
+        sendError(serversSockets[0], LOST_CONNECTION, "Conexao com client perdida.\n");
+        free(pkg);
+        return -1;
+    }
+
+    if(strcmp(pkg->type, ERRO) == 0){                // se não puder enviar os pacotes, termina função
+        printf("ERRO: %s: %s", pkg->code, pkg->data);
+        free(pkg);
+        return -1;
+    }
+    free(pkg);
+
+    while(1){
+        if(receivePackage(clientSocket, &pkg, 0) <= 0){                   // recebe pacote do client
+            printf("Conexao com client perdida.\n");
+            sendError(serversSockets[0], LOST_CONNECTION, "Conexao com client perdida.\n");
+            free(pkg);
+            return -1;
         }
-        else if(strcmp(newFileName, temp->name) > 0){
-            lastFile = temp;
-            temp = temp->right;
-            continue;
+        if(strcmp(pkg->type, ERRO) == 0){
+            printf("ERRO: %s: %s", pkg->code, pkg->data);
+            sendError(serversSockets[0], pkg->code, pkg->data);
+            free(pkg);
+            return -1;
         }
-        else if(strcmp(newFileName, temp->name) == 0){
-            printf("arquivo ja existe na arvore.\n");
-            return root;
+
+        if(sendPackage(serversSockets[0], pkg, 0) <= 0){               // envia pacote pro servidor
+            printf("Conexao com servidor perdida.\n");
+            sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
+            free(pkg);
+            return -1;
         }
+        if(strcmp(pkg->type, FEOF) == 0){
+            break;
+        }
+        free(pkg);
+    }
+    free(pkg);
+
+    if(receivePackage(serversSockets[0], &pkg, 0) <= 0){                   // Recebe output do servidor
+        printf("Conexao com servidor perdida.\n");
+        sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
+        free(pkg);
+        return -1;
     }
 
-    if(strcmp(newFileName, lastFile->name) < 0){
-        lastFile->left = newFile;
-        return root;
+    if(sendPackage(clientSocket, pkg, 0) <= 0){               // envia output pro client
+        printf("Conexao com servidor perdida.\n");
+        sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
+        free(pkg);
+        return -1;
     }
-    else if(strcmp(newFileName, lastFile->name) > 0){
-        lastFile->right = newFile;
-        return root;
+
+    if(strcmp(pkg->type, DATA) == 0){
+        root->files = addFile(root->files, fileName);
     }
+    
+    free(pkg);
+
+    return 0;
+}
+
+int downloadFile(SOCKET clientSocket, folder* root){
+    printf("baixar arquivo.\n");
+    package* pkg;
+
+    if(receivePackage(clientSocket, &pkg, 0) <= 0){                // Recebe nome do arquivo
+        printf("Conexao com cliente perdida.\n");
+        sendError(serversSockets[0], LOST_CONNECTION, "Conexao com client perdida.\n");
+        free(pkg);
+        return -1;
+    }
+    if(strcmp(pkg->type, ERRO) == 0){
+        printf("ERRO: %s: %s", pkg->code, pkg->data);
+        sendError(serversSockets[0], pkg->code, pkg->data);
+        free(pkg);
+        return -1;
+    }
+
+    if(findFile(root->files, pkg->data) == NULL){                      // Procura no sistema de arquivos
+        printf("Arquivo nao encontrado");
+        sendError(clientSocket, ERRO, "Arquivo nao encontrado.\n");
+        free(pkg);
+        return -1;
+    }
+
+    package* code;
+
+    char c[3];
+    sprintf(c, "%d", DW);
+    code = fillPackage(DATA, NORMAL, c, strlen(c)+1);
+    if(sendPackage(serversSockets[0], code, 0) <= 0){                               // envia operação pro servidor
+        printf("Conexao com servidor perdida.\n");
+        sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
+        free(code);
+        return -1;
+    }
+    free(code);
+
+    char fileName[DATA_SIZE];
+    strcpy(fileName, pkg->data);
+
+    int pathSize = 0;
+    char* namePath = getFullFolderPath(root, &pathSize);
+
+    if(pathSize < (strlen(namePath) + strlen(fileName) + 2)){
+        namePath = realloc(namePath, strlen(namePath) + strlen(fileName) + 2);
+    }
+
+    strcat(namePath, "\\");
+    strcat(namePath, fileName);
+
+    unsigned long pathHash = hash(namePath);
+    free(namePath);
+    char namePathSend[256];
+    sprintf(namePathSend, "%lu.dat", pathHash);
+
+    free(pkg);
+
+    pkg = fillPackage(DATA, NORMAL, namePathSend, strlen(namePathSend)+1);
+    if(sendPackage(serversSockets[0], pkg, 0) <= 0){                // envia nome do arquivo pro servidor
+        printf("Conexao com servidor perdida.\n");
+        sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
+        free(pkg);
+        return -1;
+    }
+    free(pkg);
+
+    if(receivePackage(serversSockets[0], &pkg, 0) <= 0){                               // Recebe se o arquivo foi aberto
+        printf("Conexao com servidor perdida.\n");
+        sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
+        free(pkg);
+        return -1;
+    }
+
+    if(sendPackage(clientSocket, pkg, 0) <= 0){                // Envia se o arquivo foi aberto
+        printf("Conexao com cliente perdida.\n");
+        sendError(serversSockets[0], LOST_CONNECTION, "Conexao com client perdida.\n");
+        free(pkg);
+        return -1;
+    }
+
+    if(strcmp(pkg->type, ERRO) == 0){                // se deu erro na abertura do arquivo, encerra a função
+        printf("ERRO: %s: %s", pkg->code, pkg->data);
+        free(pkg);
+        return -1;
+    }
+    free(pkg);
+
+    while(1){
+        if(receivePackage(serversSockets[0], &pkg, 0) <= 0){                   // recebe pacote do servidor
+            printf("Conexao com client perdida.\n");
+            sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
+            free(pkg);
+            return -1;
+        }
+        if(strcmp(pkg->type, ERRO) == 0){
+            printf("ERRO: %s: %s", pkg->code, pkg->data);
+            sendError(clientSocket, pkg->code, pkg->data);
+            free(pkg);
+            return -1;
+        }
+
+        if(sendPackage(clientSocket, pkg, 0) <= 0){               // envia pacote pro client
+            printf("Conexao com client perdida.\n");
+            sendError(serversSockets[0], LOST_CONNECTION, "Conexao com client perdida.\n");
+            free(pkg);
+            return -1;
+        }
+
+        if(strcmp(pkg->type, FEOF) == 0){
+            break;
+        }
+        free(pkg);
+    }
+    free(pkg);
+
+    printf("Download concluido.\n");
+    return 0;
+}
+
+void sendAllFiles(SOCKET clientSocket, file* root, folder* parentFolder, int* result){
+    if(root == NULL) return;
+
+    sendAllFiles(clientSocket, root->left, parentFolder, result);
+    if(*result < 0){
+        return;
+    }
+
+    package* pkg;
+
+    pkg = fillPackage(DATA, NORMAL, root->name, strlen(root->name)+1);
+    sendPackage(clientSocket, pkg, 0);                                     // Envia nome do arquivo pro client
+    free(pkg);
+    
+    char c[3];
+    sprintf(c, "%d", DW);
+    package* code = fillPackage(DATA, NORMAL, c, strlen(c)+1);
+    if(sendPackage(serversSockets[0], code, 0) <= 0){                               // envia operação pro servidor
+        printf("Conexao com servidor perdida.\n");
+        sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
+        free(code);
+        *result = -1;
+        return;
+    }
+    free(code);
+
+    char fileName[DATA_SIZE];
+    strcpy(fileName, root->name);
+
+    int pathSize = 0;
+    char* namePath = getFullFolderPath(parentFolder, &pathSize);
+
+    if(pathSize < (strlen(namePath) + strlen(fileName) + 2)){
+        namePath = realloc(namePath, strlen(namePath) + strlen(fileName) + 2);
+    }
+
+    strcat(namePath, "\\");
+    strcat(namePath, fileName);
+
+    unsigned long pathHash = hash(namePath);
+    free(namePath);
+    char namePathSend[256];
+    sprintf(namePathSend, "%lu.dat", pathHash);
+
+    pkg = fillPackage(DATA, NORMAL, namePathSend, strlen(namePathSend)+1);
+    if(sendPackage(serversSockets[0], pkg, 0) <= 0){                         // Envia nome do arquivo pro servidor
+        printf("Conexao com servidor perdida.\n");
+        sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
+        free(pkg);
+        *result = -1;
+        return;
+    }
+
+    if(receivePackage(serversSockets[0], &pkg, 0) <= 0){                               // Recebe se o arquivo foi aberto
+        printf("Conexao com servidor perdida.\n");
+        sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
+        free(pkg);
+        *result = -1;
+        return;
+    }
+
+    if(strcmp(pkg->type, ERRO) == 0){
+        sendPackage(clientSocket, pkg, 0);
+        free(pkg);
+        *result = -1;
+        return;
+    }
+    free(pkg);
+
+    while(1){               // Recebe o arquivo
+        if(receivePackage(serversSockets[0], &pkg, 0) <= 0){                   // recebe pacote do servidor
+            printf("Conexao com client perdida.\n");
+            sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
+            free(pkg);
+            *result = -1;
+            return;
+        }
+        if(strcmp(pkg->type, ERRO) == 0){
+            printf("ERRO: %s: %s", pkg->code, pkg->data);
+            sendError(clientSocket, pkg->code, pkg->data);
+            free(pkg);
+            *result = -1;
+            return;
+        }
+
+        if(sendPackage(clientSocket, pkg, 0) <= 0){               // envia pacote pro client
+            printf("Conexao com client perdida.\n");
+            sendError(serversSockets[0], LOST_CONNECTION, "Conexao com client perdida.\n");
+            free(pkg);
+            *result = -1;
+            return;
+        }
+
+        if(strcmp(pkg->type, FEOF) == 0){
+            free(pkg);
+            break;
+        }
+        free(pkg);
+    }
+
+    if(receivePackage(clientSocket, &pkg, 0) <= 0){                // Recebe se client criou o arquivo com sucesso
+        printf("Conexao com cliente perdida.\n");
+        sendError(serversSockets[0], LOST_CONNECTION, "Conexao com client perdida.\n");
+        free(pkg);
+        *result = -1;
+        return;
+    }
+    if(strcmp(pkg->type, ERRO) == 0){
+        printf("ERRO: %s: %s", pkg->code, pkg->data);
+        sendError(serversSockets[0], pkg->code, pkg->data);
+        free(pkg);
+        *result = -1;
+        return;
+    }
+
+    free(pkg);
+
+    sendAllFiles(clientSocket, root->right, parentFolder, result);
+    if(*result < 0){
+        return;
+    }
+    return;
+}
+
+int downloadFolder(SOCKET clientSocket, folder* root){
+    printf("baixar pasta.\n");
+    package* pkg;
+
+    if(receivePackage(clientSocket, &pkg, 0) <= 0){                // Recebe nome da pasta
+        printf("Conexao com cliente perdida.\n");
+        sendError(serversSockets[0], LOST_CONNECTION, "Conexao com client perdida.\n");
+        free(pkg);
+        return -1;
+    }
+    if(strcmp(pkg->type, ERRO) == 0){
+        printf("ERRO: %s: %s", pkg->code, pkg->data);
+        sendError(serversSockets[0], pkg->code, pkg->data);
+        free(pkg);
+        return -1;
+    }
+
+    folder* download = findFolder(root->subFolders, pkg->data);
+
+    free(pkg);
+
+    // ver se pasta existe
+    if(download == NULL){
+        printf("Pasta nao encontrada.\n");
+        sendError(clientSocket, ERRO, "Pasta nao encontrado.\n");
+        free(pkg);
+        return -1;
+    }
+
+    int fileAmount = countFiles(download->files);
+    char fileAmountSend[DATA_SIZE];
+
+    int netInt = htonl(fileAmount);
+
+    memcpy(fileAmountSend, &netInt, sizeof(int));
+
+    pkg = fillPackage(DATA, NORMAL, fileAmountSend, sizeof(int));
+    sendPackage(clientSocket, pkg, 0);
+    free(pkg);
+
+    if(receivePackage(clientSocket, &pkg, 0) <= 0){                // Recebe resposta do client sobre a criação da pasta
+        printf("Conexao com cliente perdida.\n");
+        sendError(serversSockets[0], LOST_CONNECTION, "Conexao com client perdida.\n");
+        free(pkg);
+        return -1;
+    }
+    if(strcmp(pkg->type, ERRO) == 0){
+        printf("ERRO: %s: %s", pkg->code, pkg->data);
+        sendError(serversSockets[0], pkg->code, pkg->data);
+        free(pkg);
+        return -1;
+    }
+
+    free(pkg);
+
+    int result = 0;
+
+    sendAllFiles(clientSocket, download->files, download, &result);
+
+    if(result < 0){
+        return -1;
+    }
+
+    return 0;
+}
+
+folder* goInFolder(SOCKET clienteSocket, folder* root){
+    package* name;
+    receivePackage(clienteSocket, &name, 0);
+
+    folder* tempFolder = findFolder(root->subFolders, name->data);
+
+    if(tempFolder != NULL){
+        return tempFolder;
+    }
+
     return root;
 }
 
-folder* addFolder(folder* root, char* name, folder* parent){
-    if(root == NULL){
-        folder* newFolder = malloc(sizeof(folder));
+int createFolder(SOCKET clientSocket, folder* root){
+    printf("Criar pasta.\n");
 
-        if(newFolder == NULL){
-            printf("Arquivo invalido por algum motivo.\n");
-            return NULL;
-        }
+    package* name = NULL;
 
-        //printf("strlen: %d", strlen(name));
-        char* newFolderName = malloc(sizeof(char) * strlen(name));
-
-        if(newFolderName == NULL){
-            perror("Erro ao alocar nome");
-            printf("strlen: %s", strlen(name));
-        }
-
-        strcpy(newFolderName, name);
-
-        newFolder->name = newFolderName;
-        newFolder->parentFolder = parent;
-        newFolder->files = NULL;
-        newFolder->left = NULL;
-        newFolder->right = NULL;
-        newFolder->subFolders = NULL;
-
-        return newFolder;
+    if(receivePackage(clientSocket, &name, 0) <= 0){         // Recebe nome da pasta
+        printf("Erro ao receber nome da pasta.\n");
+        sendError(clientSocket, INVALID_ARGUMENT, "Erro ao receber nome da pasta.\n");
+        free(name);
+        return -1;
+    }
+    if(name->dataSize <= 1){
+        printf("Nome de pasta invalido.\n");
+        sendError(clientSocket, INVALID_ARGUMENT, "Nome da pasta inválido.\n");
+        free(name);
+        return -1;
     }
 
-    int cmp = strcmp(name, root->name);
-
-    if(cmp < 0){
-        root->left = addFolder(root->left, name, parent);
-    }
-    else if(cmp > 0){
-        root->right = addFolder(root->right, name, parent);
-    }
-    else{
-        printf("pasta com esse nome ja existe");
+    if(!addFolder(root, name->data)){
+        printf("Pasta nao pode ser criada.\n");
+        sendError(clientSocket, INVALID_ARGUMENT, "Pasta ja existe ou erro esquisito ocorreu.\n");
+        free(name);
+        return -1;
     }
 
-    return root;
-}
+    free(name);
 
-file* findFile(file* root, char* name){
-    if(root == NULL){
-        printf("Arquivo invalido.\n");
-        return NULL;
-    }
+    package* pkg = fillPackage(DATA, NORMAL, "Pasta criada.\n", strlen("Pasta criada.\n")+1);
+    sendPackage(clientSocket, pkg, 0);
+    free(pkg);
 
-    int cmp = strcmp(name, root->name);
-
-    if(cmp == 0){
-        return root;
-    }
-    else if(cmp < 0){
-        return findFile(root->left, name);
-    }
-    else{
-        return findFile(root->right, name);
-    }
-}
-
-folder* findFolder(folder* root, char* name){
-
-    if(root == NULL){
-        printf("Pasta invalida.\n");
-        return NULL;
-    }
-
-    int cmp = strcmp(name, root->name);
-
-    if(cmp == 0){
-        return root;
-    }
-    else if(cmp < 0){
-        return findFolder(root->left, name);
-    }
-    else{
-        return findFolder(root->right, name);
-    }
+    return 0;
 }
 
 file* removeFile(file* root, char* name){
@@ -388,27 +902,33 @@ file* removeFile(file* root, char* name){
     return root;
 }
 
-void freeFiles(file* root){
+void freeFiles(file** root, SOCKET clientSocket, folder* parentFolder){
+    if(*root == NULL) return;
+
+    freeFiles(&((*root)->left), clientSocket, parentFolder);
+    freeFiles(&((*root)->right), clientSocket, parentFolder);
+
+    deleteFile(clientSocket, parentFolder, (*root)->name);
+}
+
+void freeFolders(folder* root, SOCKET clientSocket){
     if(root == NULL) return;
 
-    freeFiles(root->left);
-    freeFiles(root->right);
+    freeFolders(root->left, clientSocket);
+    freeFolders(root->right, clientSocket);
+    freeFiles(&(root->files), clientSocket, root);
+    freeFolders(root->subFolders, clientSocket);
     free(root->name);
     free(root);
 }
 
-void freeFolders(folder* root){
-    if(root == NULL) return;
-
-    freeFolders(root->left);
-    freeFolders(root->right);
-    freeFiles(root->files);
-    freeFolders(root->subFolders);
-    free(root->name);
-    free(root);
+BOOL removeFolder(folder* root, char* name, SOCKET clientSocket){
+    BOOL success = FALSE;
+    root->subFolders = removeFolderCore(root->subFolders, name, &success, clientSocket);
+    return success;
 }
 
-folder* removeFolder(folder* root, char* name){
+folder* removeFolderCore(folder* root, char* name, BOOL* success, SOCKET clientSocket){
     if(root == NULL) return NULL;
 
     BOOLEAN isLeft;
@@ -437,14 +957,21 @@ folder* removeFolder(folder* root, char* name){
         //é a raiz
         if(remove->left == NULL){
             folder* newRoot = remove->right;
+            freeFolders(remove->subFolders, clientSocket);
+            freeFiles(&(remove->files), clientSocket, remove);
             free(remove->name);
             free(remove);
+            *success = TRUE;
+            
             return newRoot;
         }
         else if(remove->right == NULL){
             folder* newRoot = remove->left;
+            freeFolders(remove->subFolders, clientSocket);
+            freeFiles(&(remove->files), clientSocket, remove);
             free(remove->name);
             free(remove);
+            *success = TRUE;
             return newRoot;
         }
 
@@ -459,13 +986,18 @@ folder* removeFolder(folder* root, char* name){
             remove->left = leftFolder->left;
         }
 
-        // conteudo de temp --> remove
+        freeFolders(remove->subFolders, clientSocket);
+        freeFiles(&(remove->files), clientSocket, remove);
         free(remove->name);
+        
+        // conteudo de temp --> remove
         remove->name = temp->name;
+        remove->files = temp->files;
+        remove->subFolders = temp->subFolders;
         // Parent não é necessários, todos têm o mesmo parent por estarem na mesma subfolder
         temp->name = NULL;
         free(temp);
-
+        *success = TRUE;
         return root;
     }
     else if(remove->left == NULL){       // tem o da direita
@@ -475,8 +1007,11 @@ folder* removeFolder(folder* root, char* name){
         else{
             parent->right = remove->right;
         }
+        freeFolders(remove->subFolders, clientSocket);
+        freeFiles(&(remove->files), clientSocket, remove);
         free(remove->name);
         free(remove);
+        *success = TRUE;
         return root;
     }
     else if(remove->right == NULL){     //tem o da esquerda
@@ -486,251 +1021,212 @@ folder* removeFolder(folder* root, char* name){
         else{
             parent->right = remove->left;
         }
+        freeFolders(remove->subFolders, clientSocket);
+        freeFiles(&(remove->files), clientSocket, remove);
         free(remove->name);
         free(remove);
+        *success = TRUE;
         return root;
     }
     
     return root;
 }
 
-void saveFiles(file* root, FILE* fptr){
-    if(root == NULL) return;
+int deleteFolder(SOCKET clientSocket, folder* root){
+    printf("deletar pasta.\n");
 
-    fprintf(fptr, "%s:", root->name);
+    package* name;
 
-    saveFiles(root->left, fptr);
-    saveFiles(root->right, fptr);
-}
-
-void saveFolders(folder* root, FILE* fptr){
-    if(root == NULL) return;
-
-    fprintf(fptr, "%s<", root->name);
-    saveFiles(root->files,fptr);
-    fprintf(fptr, "\n");
-
-    saveFolders(root->subFolders, fptr);
-    fprintf(fptr, ">\n", root->name);
-
-    saveFolders(root->left, fptr);
-    
-    saveFolders(root->right, fptr);
-}
-
-int memSave(folder* root, char* path){      // Alterar para salvar em um arquivo temporário antes, e então substituir o original
-    FILE* fptr = fopen(path, "wb");         // Isso é  pra caso o monitor seja interrompido durante o salvamento, não perca tudo.
-
-    saveFolders(root, fptr);
-
-    fclose(fptr);
-    return 0;
-}
-
-char* getLine(FILE* fptr){
-    char buffer[BUFFER_SIZE];
-    memset(buffer, 0, BUFFER_SIZE);
-    char* fullLine = NULL;
-    size_t lineLength = 0;
-
-    while(fgets(buffer, BUFFER_SIZE, fptr)){
-        size_t bufferLength = strlen(buffer);
-        char* newLine = realloc(fullLine, lineLength + bufferLength + 1);
-        fullLine = newLine;
-        memcpy(fullLine + lineLength, buffer, bufferLength+1);
-        lineLength += bufferLength;
-
-        if(fullLine[lineLength-1] == '\n' || feof(fptr)){
-            fullLine[lineLength-1] = '\0';
-
-            //printf("%s", fullLine);
-            //printf("\nfile pos: %d\n", (int)ftell(fptr));
-
-            lineLength = 0;
-            return fullLine;
-        }
+    if(receivePackage(clientSocket, &name, 0) <= 0){         // Recebe nome da pasta
+        printf("Erro ao receber nome da pasta.\n");
+        free(name);
+        return -1;
     }
-}
-
-folder* memLoad(FILE* fptr){
-    folder* root = malloc(sizeof(folder));
-    char* line = getLine(fptr);
-
-    char* fileItems = strchr(line, '<');
-
-    *fileItems = '\0';
-
-    char* folderName = malloc(strlen(line));
-    strcpy(folderName,line);
-    //printf("\nline: %s\n", folderName);
-
-    root->name = folderName;
-    root->left = NULL;
-    root->right = NULL;
-    root->parentFolder = NULL;
-    root->subFolders = NULL;
-    root->files = NULL;
-
-    fileItems++;
-    char* token = strtok(fileItems, ":");
-    while(token){
-        //printf("f: %s\n", token);
-        root->files = addFile(root->files, token);
-        token = strtok(NULL, ":");
+    if(name->dataSize <= 1){
+        printf("Nome de pasta invalido.\n");
+        sendError(clientSocket, INVALID_ARGUMENT, "Nome da pasta inválido.\n");
+        free(name);
+        return -1;
     }
 
-    free(line);
-
-    folder* currentFolder = root;
-
-    while(!feof(fptr)){
-        line = getLine(fptr);
-        if(line == NULL) break;
-        if(line[0] == '>'){
-            if(currentFolder->parentFolder != NULL) currentFolder = currentFolder->parentFolder;
-            continue;
-        }
-
-        char* fileItems = strchr(line, '<');
-        *fileItems = '\0';
-
-        char* subFolderName = malloc(strlen(line));
-        strcpy(subFolderName, line);
-        currentFolder->subFolders = addFolder(currentFolder->subFolders, subFolderName, currentFolder);
-        
-        folder* tempfolder = findFolder(currentFolder->subFolders, subFolderName);
-
-        if(tempfolder != NULL) currentFolder = tempfolder;
-        
-        fileItems++;
-        char* token = strtok(fileItems, ":");
-        while(token){
-            //printf("f: %s\n", token);
-            currentFolder->files = addFile(currentFolder->files, token);
-            token = strtok(NULL, ":");
-        }
-
-        free(line);
+    if(!removeFolder(root, name->data, clientSocket)){
+        printf("Pasta nao pode ser deletada.\n");
+        //sendError(clientSocket, INVALID_ARGUMENT, "Pasta nao encontrada ou erro esquisito ocorreu.\n");
+        free(name);
+        return -1;
     }
 
-    return root;
-}
-
-void getFiles(file* root, char* storage){
-    if(root != NULL){
-        getFiles(root->left, storage);
-        strcat(storage, root->name);
-        strcat(storage, "\n");
-        getFiles(root->right, storage);
-    }
-}
-
-void getFolders(folder* root, char* storage){
-    if(root != NULL){
-        getFolders(root->left, storage);
-        strcat(storage, root->name);
-        strcat(storage, "\n");
-        getFolders(root->right, storage);
-    }
-}
-
-int listFiles(SOCKET clientSocket, folder* root){
-    printf("listar arquivos.\n");
-
-    int packageAmount = 0;
-    char buffer[DATA_SIZE];
-    memset(buffer, 0, DATA_SIZE);
-
-    // Fazer algo pra caso seja maior que o buffer ????
-    sprintf(buffer, "Pasta: %s\n\n|Arquivos|:\n", root->name);
-    getFiles(root->files, buffer);
-    strcat(buffer, "\n|Pastas|:\n");
-    getFolders(root->subFolders, buffer);
-
-    package* pkg = fillPackage(DATA, NORMAL, buffer, strlen(buffer)+1);
+    package* pkg;
+    pkg = fillPackage(DATA, NORMAL, "Pasta deletada.\n", strlen("Pasta deletada.\n")+1);
 
     sendPackage(clientSocket, pkg, 0);
-
     free(pkg);
-
-    printf("list executado.\n");
 
     return 0;
 }
 
-int deleteFile(SOCKET clientSocket, folder* root){
-    package* pkg;
-    char buffer[BUFFER_SIZE];
-    memset(buffer, 0, BUFFER_SIZE);
-    
-    printf("remover arquivo.\n");
+int copyFile(SOCKET clientSocket, folder* currentFolder, folder* root){
+    printf("Copiar arquivo.\n");
 
-    if(receivePackage(clientSocket, &pkg, 0) <= 0){        // Recebe informações do arquivo (nome)
-        printf("Conexao perdida com o client.\n");
-        sendError(serversSockets[0], LOST_CONNECTION, "Conexao perdida com o client.\n");
-        free(pkg);
+    package* fileName;
+
+    if(receivePackage(clientSocket, &fileName, 0) <= 0){         // Recebe nome do arquivo
+        printf("Erro ao receber nome da pasta.\n");
+        free(fileName);
+        return -1;
+    }
+    if(strcmp(fileName->type, ERRO) == 0){
+        printf("ERRO: %s: %s", fileName->code, fileName->data);
+        free(fileName);
+        return -1;
+    }
+    if(fileName->dataSize <= 1){
+        printf("Nome de pasta invalido.\n");
+        sendError(clientSocket, INVALID_ARGUMENT, "Nome de arquivo inválido.\n");
+        free(fileName);
         return -1;
     }
 
-    if(strcmp(pkg->type, ERRO) == 0){       // DEU ERRO
-        printf("ERRO: %s: %s", pkg->code, pkg->data);
-        sendError(serversSockets[0], pkg->code, pkg->data);
-        free(pkg);
+    package* folderPath;
+
+    if(receivePackage(clientSocket, &folderPath, 0) <= 0){         // Recebe nome da pasta de destino
+        printf("Erro ao receber nome da pasta.\n");
+        free(folderPath);
+        free(fileName);
+        return -1;
+    }
+    if(strcmp(folderPath->type, ERRO) == 0){
+        printf("ERRO: %s: %s", folderPath->code, folderPath->data);
+        free(folderPath);
+        free(fileName);
+        return -1;
+    }
+    if(folderPath->dataSize <= 1){
+        printf("Nome de pasta invalido.\n");
+        sendError(clientSocket, INVALID_ARGUMENT, "Nome da pasta inválido.\n");
+        free(folderPath);
+        free(fileName);
         return -1;
     }
 
-    char fileName[DATA_SIZE];
-    strcpy(fileName, pkg->data);
-
-    if(findFile(root->files, fileName) == NULL){
-        printf("Arquivo nao encontrado");
-        memset(buffer, 0, BUFFER_SIZE);
-
+    if(findFile(currentFolder->files, fileName->data) == NULL){
+        printf("Arquivo nao encontrado.\n");
         sendError(clientSocket, NORMAL, "Arquivo nao encontrado.\n");
-
-        free(pkg);
         return -1;
     }
 
-    package* code = fillPackage(DATA, NORMAL, "2\0", 2);
-    if(sendPackage(serversSockets[0], code, 0) <= 0){           // Envia operação pro server
+    folder* destinationFolder = root;
+    char* folderName = strtok(folderPath->data, "\\");          // identificação do client (raiz)
+
+    while((folderName = strtok(NULL, "\\")) != NULL){
+        destinationFolder = findFolder(destinationFolder->subFolders, folderName);
+
+        if(destinationFolder == NULL){
+            printf("Pasta de destino nao encontrada.\n");
+            sendError(clientSocket, NORMAL, "Pasta de destino nao encontrada\n");
+            free(folderPath);
+            free(fileName);
+            return -1;
+        }
+
+    }
+
+    if(findFile(destinationFolder->files, fileName->data) != 0){
+        sendError(clientSocket, NORMAL, "Arquivo ja existe na pasta indicada.\n");
+        free(folderPath);
+        free(fileName);
+        return -1;
+    }
+
+    // hash do arquivo a ser copiado
+    int pathSize = 0;
+    char* filePath = getFullFolderPath(currentFolder, &pathSize);
+
+    if(pathSize < (strlen(filePath) + strlen(fileName->data) + 2)){
+        filePath = realloc(filePath, strlen(filePath) + strlen(fileName->data) + 2);
+    }
+
+    strcat(filePath, "\\");
+    strcat(filePath, fileName->data);
+
+    unsigned long filePathHash = hash(filePath);
+    free(filePath);
+    char filePathSend[256];
+    sprintf(filePathSend, "%lu.dat", filePathHash);
+
+    // hash do arquivo na nova pasta
+    pathSize = 0;
+    char* destinationFolderPath = getFullFolderPath(destinationFolder, &pathSize);
+
+    if(pathSize < (strlen(destinationFolderPath) + strlen(fileName->data) + 2)){
+        destinationFolderPath = realloc(destinationFolderPath, strlen(destinationFolderPath) + strlen(fileName->data) + 2);
+    }
+
+    strcat(destinationFolderPath, "\\");
+    strcat(destinationFolderPath, fileName->data);
+
+    unsigned long destinationFolderPathHash = hash(destinationFolderPath);
+    free(destinationFolderPath);
+    char destinationFolderPathSend[256];
+    sprintf(destinationFolderPathSend, "%lu.dat", destinationFolderPathHash);
+
+    package* code;
+    char c[3];
+    sprintf(c, "%d", CP);
+    code = fillPackage(DATA, NORMAL, c, strlen(c)+1);
+    if(sendPackage(serversSockets[0], code, 0) <= 0){                               // envia operação pro servidor
         printf("Conexao com servidor perdida.\n");
         sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
-        free(pkg);
         free(code);
         return -1;
     }
     free(code);
-    if(sendPackage(serversSockets[0], pkg, 0) <= 0){           // envia nome do arquivo pro server
+
+    package* pkg;
+
+    pkg = fillPackage(DATA, NORMAL, filePathSend, strlen(filePathSend)+1);
+    if(sendPackage(serversSockets[0], pkg, 0) <= 0){                        // envia nome do arquivo pro server
         printf("Conexao com servidor perdida.\n");
         sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
+        free(folderPath);
+        free(fileName);
         free(pkg);
         return -1;
     }
     free(pkg);
 
-    memset(buffer, 0, BUFFER_SIZE);       
-
-    if(receivePackage(serversSockets[0], &pkg, 0) <= 0){            // recebe resultado de deleção
+    pkg = fillPackage(DATA, NORMAL, destinationFolderPathSend, strlen(destinationFolderPathSend)+1);
+    if(sendPackage(serversSockets[0], pkg, 0) <= 0){                        // envia nome da pasta de destino pro server
         printf("Conexao com servidor perdida.\n");
         sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
+        free(folderPath);
+        free(fileName);
+        free(pkg);
+        return -1;
+    }
+    free(pkg);
+
+    free(folderPath);
+
+    if(receivePackage(serversSockets[0], &pkg, 0) <= 0){            // recebe resultado de copia
+        printf("Conexao com servidor perdida.\n");
+        sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
+        free(fileName);
         free(pkg);
         return -1;
     }
 
-    if(strcmp(pkg->type, DATA) != 0){
+    if(strcmp(pkg->data, ERRO) == 0){
+        //destinationFolder->files = removeFile(destinationFolder->files, fileName->data);
         printf("ERRO: %s: %s", pkg->code, pkg->data);
         sendError(clientSocket, pkg->code, pkg->data);
+        free(fileName);
         free(pkg);
         return -1;
     }
+    destinationFolder->files = addFile(destinationFolder->files, fileName->data);
+    free(fileName);
 
-    if(strcmp(pkg->data, "1\0") == 0){
-        root->files = removeFile(root->files, fileName);
-    }
-    free(pkg);      
-
-    pkg = fillPackage(DATA, NORMAL, "Arquivo removido.\n", strlen("Arquivo removido.\n")+1);
     sendPackage(clientSocket, pkg, 0);                         // Envia resultado pro client
 
     free(pkg);
@@ -738,217 +1234,192 @@ int deleteFile(SOCKET clientSocket, folder* root){
     return 0;
 }
 
-int uploadFile(SOCKET clientSocket, folder* root){
-    package* pkg;
-    int packageAmount = 0;
-    int i = 0;
-    printf("inserir arquivo.\n");             
+void copyAllFiles(SOCKET clientSocket, folder* sourceFolder, folder* destinationFolder, file* sourceFile, int* result){
+    if(sourceFolder == NULL) return;
+    if(destinationFolder == NULL) return;
+    if(sourceFile == NULL) return;
 
-    pkg = fillPackage(DATA, NORMAL, "3\0", 2);
-    if(sendPackage(serversSockets[0], pkg, 0) <= 0){               // envia operação pro servidor
-        printf("Conexao com servidor perdida.\n");
-        sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
-        free(pkg);
-        return -1;
-    }
-    free(pkg);
-
-    if(receivePackage(clientSocket, &pkg, 0) <= 0){                // Recebe informações do arquivo
-        printf("Conexao com cliente perdida.\n");
-        sendError(serversSockets[0], LOST_CONNECTION, "Conexao com client perdida.\n");
-        free(pkg);
-        return -1;
-    }
-    if(strcmp(pkg->type, ERRO) == 0){
-        printf("ERRO: %s: %s", pkg->code, pkg->data);
-        sendError(serversSockets[0], pkg->code, pkg->data);
-        free(pkg);
-        return -1;
+    copyAllFiles(clientSocket, sourceFolder, destinationFolder, sourceFile->left, result);
+    if(result < 0){
+        return;
     }
 
-    if(sendPackage(serversSockets[0], pkg, 0) <= 0){                // envia informações do arquivo pro servidor
-        printf("Conexao com servidor perdida.\n");
-        sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
-        free(pkg);
-        return -1;
-    }                        
+    // hash do arquivo a ser copiado
+    int pathSize = 0;
+    char* filePath = getFullFolderPath(sourceFolder, &pathSize);
 
-    // Tokeniza e separa as informações
-    char* token = strtok(pkg->data, ";");
-    packageAmount = atoi(token);
-
-    token = strtok(NULL, ";");
-    char* fileName = malloc(sizeof(token));
-    strcpy(fileName, token);
-    token = NULL;
-
-    free(pkg);           
-
-    if(receivePackage(serversSockets[0], &pkg, 0) <= 0){                               // Recebe se o servidor pode receber o arquivo
-        printf("Conexao com servidor perdida.\n");
-        sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
-        free(pkg);
-        return -1;
+    if(pathSize < (strlen(filePath) + strlen(sourceFile->name) + 2)){
+        filePath = realloc(filePath, strlen(filePath) + strlen(sourceFile->name) + 2);
     }
 
-    if(sendPackage(clientSocket, pkg, 0) <= 0){                // Envia informação SE está tudo certo e pode começar a mandar os pacotes
-        printf("Conexao com cliente perdida.\n");
-        sendError(serversSockets[0], LOST_CONNECTION, "Conexao com client perdida.\n");
-        free(pkg);
-        return -1;
+    strcat(filePath, "\\");
+    strcat(filePath, sourceFile->name);
+
+    unsigned long filePathHash = hash(filePath);
+    free(filePath);
+    char filePathSend[256];
+    sprintf(filePathSend, "%lu.dat", filePathHash);
+
+    // hash do arquivo na nova pasta
+    pathSize = 0;
+    char* destinationFolderPath = getFullFolderPath(destinationFolder, &pathSize);
+
+    if(pathSize < (strlen(destinationFolderPath) + strlen(sourceFile->name) + 2)){
+        destinationFolderPath = realloc(destinationFolderPath, strlen(destinationFolderPath) + strlen(sourceFile->name) + 2);
     }
 
-    if(strcmp(pkg->type, ERRO) == 0){                // se não puder enviar os pacotes, termina função
-        printf("ERRO: %s: %s", pkg->code, pkg->data);
-        free(pkg);
-        return -1;
-    }
-    free(pkg);
+    strcat(destinationFolderPath, "\\");
+    strcat(destinationFolderPath, sourceFile->name);
 
-    while(1){
-        if(receivePackage(clientSocket, &pkg, 0) <= 0){                   // recebe pacote do client
-            printf("Conexao com client perdida.\n");
-            sendError(serversSockets[0], LOST_CONNECTION, "Conexao com client perdida.\n");
-            free(pkg);
-            return -1;
-        }
-        if(strcmp(pkg->type, ERRO) == 0){
-            printf("ERRO: %s: %s", pkg->code, pkg->data);
-            sendError(serversSockets[0], pkg->code, pkg->data);
-            free(pkg);
-            return -1;
-        }
-
-        if(sendPackage(serversSockets[0], pkg, 0) <= 0){               // envia pacote pro servidor
-            printf("Conexao com servidor perdida.\n");
-            sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
-            free(pkg);
-            return -1;
-        }
-        if(strcmp(pkg->type, FEOF) == 0){
-            break;
-        }
-        free(pkg);
-    }
-    free(pkg);
-
-    if(receivePackage(serversSockets[0], &pkg, 0) <= 0){                   // Recebe output do servidor
-        printf("Conexao com servidor perdida.\n");
-        sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
-        free(pkg);
-        return -1;
-    }
-
-    if(sendPackage(clientSocket, pkg, 0) <= 0){               // envia output pro client
-        printf("Conexao com servidor perdida.\n");
-        sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
-        free(pkg);
-        return -1;
-    }
-
-    if(strcmp(pkg->type, DATA) == 0){
-        root->files = addFile(root->files, fileName);
-    }
-    
-    free(fileName);
-    free(pkg);
-
-    return 0;
-}
-
-int downloadFile(SOCKET clientSocket, folder* root){
-    printf("baixar arquivo.\n");
-    package* pkg;
-
-    if(receivePackage(clientSocket, &pkg, 0) <= 0){                // Recebe nome do arquivo
-        printf("Conexao com cliente perdida.\n");
-        sendError(serversSockets[0], LOST_CONNECTION, "Conexao com client perdida.\n");
-        free(pkg);
-        return -1;
-    }
-    if(strcmp(pkg->type, ERRO) == 0){
-        printf("ERRO: %s: %s", pkg->code, pkg->data);
-        sendError(serversSockets[0], pkg->code, pkg->data);
-        free(pkg);
-        return -1;
-    }
-
-    if(findFile(root->files, pkg->data) == NULL){                      // Procura no sistema de arquivos
-        printf("Arquivo nao encontrado");
-        sendError(clientSocket, ERRO, "Arquivo nao encontrado.\n");
-
-        return -1;
-    }
+    unsigned long destinationFolderPathHash = hash(destinationFolderPath);
+    free(destinationFolderPath);
+    char destinationFolderPathSend[256];
+    sprintf(destinationFolderPathSend, "%lu.dat", destinationFolderPathHash);
 
     package* code;
-    code = fillPackage(DATA, NORMAL, "4\0", 2);
-    if(sendPackage(serversSockets[0], code, 0) <= 0){               // envia operação pro servidor
+    char c[3];
+    sprintf(c, "%d", CP);
+    code = fillPackage(DATA, NORMAL, c, strlen(c)+1);
+    if(sendPackage(serversSockets[0], code, 0) <= 0){                               // envia operação pro servidor
         printf("Conexao com servidor perdida.\n");
         sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
         free(code);
-        return -1;
+        *result = -1;
+        return;
     }
     free(code);
 
-    if(sendPackage(serversSockets[0], pkg, 0) <= 0){                // envia nome do arquivo pro servidor
+    package* pkg;
+    pkg = fillPackage(DATA, NORMAL, filePathSend, strlen(filePathSend)+1);
+    if(sendPackage(serversSockets[0], pkg, 0) <= 0){                        // envia nome do arquivo pro server
         printf("Conexao com servidor perdida.\n");
         sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
         free(pkg);
-        return -1;
+        *result = -1;
+        return;
     }
     free(pkg);
 
-    if(receivePackage(serversSockets[0], &pkg, 0) <= 0){                               // Recebe se o arquivo foi aberto
+    pkg = fillPackage(DATA, NORMAL, destinationFolderPathSend, strlen(destinationFolderPathSend)+1);
+    if(sendPackage(serversSockets[0], pkg, 0) <= 0){                        // envia nome da pasta de destino pro server
         printf("Conexao com servidor perdida.\n");
         sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
         free(pkg);
-        return -1;
+        *result = -1;
+        return;
     }
-
-    if(sendPackage(clientSocket, pkg, 0) <= 0){                // Envia se o arquivo foi aberto
-        printf("Conexao com cliente perdida.\n");
-        sendError(serversSockets[0], LOST_CONNECTION, "Conexao com client perdida.\n");
+    free(pkg);
+    
+    if(receivePackage(serversSockets[0], &pkg, 0) <= 0){            // recebe resultado de copia
+        printf("Conexao com servidor perdida.\n");
+        sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
         free(pkg);
-        return -1;
+        *result = -1;
+        return;
     }
 
-    if(strcmp(pkg->type, ERRO) == 0){                // se deu erro na abertura do arquivo, encerra a função
+    if(strcmp(pkg->data, ERRO) == 0){
         printf("ERRO: %s: %s", pkg->code, pkg->data);
+        sendError(clientSocket, pkg->code, pkg->data);
         free(pkg);
+        *result = -1;
+        return;
+    }
+    free(pkg);
+    destinationFolder->files = addFile(destinationFolder->files, sourceFile->name);
+
+    copyAllFiles(clientSocket, sourceFolder, destinationFolder, sourceFile->right, result);
+    if(result < 0){
+        return;
+    }
+    return;
+}
+
+int copyFolder(SOCKET clientSocket, folder* currentFolder, folder* root){
+    printf("Copiar pasta.\n");
+
+    package* sourceFolderName;
+
+    if(receivePackage(clientSocket, &sourceFolderName, 0) <= 0){         // Recebe nome da pasta que vai ser copiada
+        printf("Erro ao receber nome da pasta.\n");
+        free(sourceFolderName);
         return -1;
     }
-    free(pkg);
-
-    while(1){
-        if(receivePackage(serversSockets[0], &pkg, 0) <= 0){                   // recebe pacote do servidor
-            printf("Conexao com client perdida.\n");
-            sendError(clientSocket, LOST_CONNECTION, "Conexao com servidor perdida.\n");
-            free(pkg);
-            return -1;
-        }
-        if(strcmp(pkg->type, ERRO) == 0){
-            printf("ERRO: %s: %s", pkg->code, pkg->data);
-            sendError(clientSocket, pkg->code, pkg->data);
-            free(pkg);
-            return -1;
-        }
-
-        if(sendPackage(clientSocket, pkg, 0) <= 0){               // envia pacote pro client
-            printf("Conexao com client perdida.\n");
-            sendError(serversSockets[0], LOST_CONNECTION, "Conexao com client perdida.\n");
-            free(pkg);
-            return -1;
-        }
-
-        if(strcmp(pkg->type, FEOF) == 0){
-            break;
-        }
-        free(pkg);
+    if(strcmp(sourceFolderName->type, ERRO) == 0){
+        printf("ERRO: %s: %s", sourceFolderName->code, sourceFolderName->data);
+        free(sourceFolderName);
+        return -1;
     }
-    free(pkg);
+    if(sourceFolderName->dataSize <= 1){
+        printf("Nome de pasta invalido.\n");
+        sendError(clientSocket, INVALID_ARGUMENT, "Nome de arquivo inválido.\n");
+        free(sourceFolderName);
+        return -1;
+    }
 
-    printf("Download concluido.\n");
-    return 0;
+    package* destinationFolderPath;
+
+    if(receivePackage(clientSocket, &destinationFolderPath, 0) <= 0){         // Recebe nome da pasta de destino
+        printf("Erro ao receber nome da pasta.\n");
+        free(destinationFolderPath);
+        free(sourceFolderName);
+        return -1;
+    }
+    if(strcmp(destinationFolderPath->type, ERRO) == 0){
+        printf("ERRO: %s: %s", destinationFolderPath->code, destinationFolderPath->data);
+        free(destinationFolderPath);
+        free(sourceFolderName);
+        return -1;
+    }
+    if(destinationFolderPath->dataSize <= 1){
+        printf("Nome de pasta invalido.\n");
+        sendError(clientSocket, INVALID_ARGUMENT, "Nome de arquivo inválido.\n");
+        free(destinationFolderPath);
+        free(sourceFolderName);
+        return -1;
+    }
+
+    folder* sourceFolder = findFolder(currentFolder->subFolders, sourceFolderName->data);
+
+    if(sourceFolder == NULL){
+        printf("Pasta nao encontrada.\n");
+        sendError(clientSocket, NORMAL, "Pasta nao encontrada.\n");
+        free(destinationFolderPath);
+        free(sourceFolderName);
+        return -1;
+    }
+
+    folder* destinationFolder = root;
+    char* folderName = strtok(destinationFolderPath->data, "\\");          // identificação do client (raiz)
+
+    while((folderName = strtok(NULL, "\\")) != NULL){
+        destinationFolder = findFolder(destinationFolder->subFolders, folderName);
+
+        if(destinationFolder == NULL){
+            printf("Pasta de destino nao encontrada.\n");
+            sendError(clientSocket, NORMAL, "Pasta de destino nao encontrada\n");
+            free(destinationFolderPath);
+            free(sourceFolderName);
+            return -1;
+        }
+    }
+
+    int result = 0;
+
+    copyAllFiles(clientSocket, sourceFolder, destinationFolder, sourceFolder->files, &result);
+
+    free(destinationFolderPath);
+    free(sourceFolderName);
+
+    if(result >= 0){
+        package* pkg = fillPackage(DATA, NORMAL, "Pasta copiada.\n", strlen("Pasta copiada.\n")+1);
+        sendPackage(clientSocket, pkg, 0);
+        free(pkg);
+
+        return 0;
+    }
+
+    return -1;
 }
 
 int main() {

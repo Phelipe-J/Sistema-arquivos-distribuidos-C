@@ -1,4 +1,4 @@
-#include "fileStructure.h"
+#include "communication.h"
 #include "info.h"
 //OBS MONITOR_IP foi definido em info.h
 
@@ -9,10 +9,11 @@
 
 SOCKET connectionSocket;
 
-int listFiles();
 int deleteFile();
 int uploadFile();
 int downloadFile();
+int createFolder();
+int copyFile();
 
 BOOL WINAPI consoleHandler(DWORD signal){
     if(signal == CTRL_CLOSE_EVENT){
@@ -44,17 +45,24 @@ int communication(){
 
             switch (opcode)
             {
-            case 1:
-                /* code */
+            case DEL:
+                deleteFile();
                 break;
-            case 2:
-                deleteFile(connectionSocket);
+
+            case UP:
+                uploadFile();
                 break;
-            case 3:
-                uploadFile(connectionSocket);
+
+            case DW:
+                downloadFile();
                 break;
-            case 4:
-                downloadFile(connectionSocket);
+
+            case CF:
+                createFolder();
+                break;
+
+            case CP:
+                copyFile();
                 break;
             default:
                 break;
@@ -81,7 +89,6 @@ int deleteFile(){
     }
     if(strcmp(pkg->type, DATA) != 0){
         printf("ERRO: %s: %s", pkg->code, pkg->data);
-        sendError(connectionSocket, pkg->code, pkg->data);
         free(pkg);
         return -1;
     }
@@ -107,34 +114,6 @@ int deleteFile(){
     return -1;
 }
 
-int createFolder(){                 // falta implementar e testar
-    printf("criar pasta.\n");
-    
-    char buffer[BUFFER_SIZE];
-    int result = 0;
-
-    memset(buffer, 0, BUFFER_SIZE);
-    recv(connectionSocket, buffer, BUFFER_SIZE, 0);    // Recebe nome da pasta
-
-    char* path = malloc(sizeof(PATH) + strlen(buffer));
-    strcpy(path, PATH);
-    strcat(path, buffer);
-
-    result = mkdir(path);
-
-    if(!result){
-        printf("Pasta criada.\n");
-    }
-    else{
-        printf("Nao foi possivel criar pasta.\n");
-        free(path);
-        return 1;
-    }
-
-    free(path);
-    return 0;
-}
-
 int uploadFile(){
     int packageAmount = 0;
     int i = 0;
@@ -145,7 +124,7 @@ int uploadFile(){
 
     printf("inserir arquivo.\n");
 
-    if(receivePackage(connectionSocket, &pkg, 0) <= 0){        // Recebe informações do arquivo
+    if(receivePackage(connectionSocket, &pkg, 0) <= 0){        // Recebe informações do arquivo (namePath)
         printf("Conexao com monitor perdida.\n");
         free(pkg);
         return -1;
@@ -156,17 +135,7 @@ int uploadFile(){
         return -1;
     }
 
-    // Tokeniza e separa as informações
-    char* token = strtok(pkg->data, ";");
-    packageAmount = atoi(token);
-
-    token = strtok(NULL, ";");
-    char* fileName = malloc(sizeof(token));
-    strcpy(fileName, token);
-
-    strcat(path, fileName);
-
-    token = NULL;
+    strcat(path, pkg->data);
 
     free(pkg);
 
@@ -224,7 +193,6 @@ int uploadFile(){
 
     fclose(fptr);
     free(pkg);
-    free(fileName);
 
     printf("arquivo criado.\n");
 
@@ -247,11 +215,11 @@ int downloadFile(){
 
     if(receivePackage(connectionSocket, &pkg, 0) <= 0){        //recebe nome do arquivo
         printf("Conexao com monitor perdida.\n");
+        free(pkg);
         return -1;
     }
-    if(strcmp(pkg->type, DATA) != 0){
+    if(strcmp(pkg->type, ERRO) == 0){
         printf("ERRO: %s: %s", pkg->code, pkg->data);
-        sendError(connectionSocket, pkg->code, pkg->data);
         free(pkg);
         return -1;
     }
@@ -299,6 +267,84 @@ int downloadFile(){
     free(pkg);
 
     printf("Download concluido.\n");
+    return 0;
+}
+
+int copyFile(){
+    package* fileName;
+    if(receivePackage(connectionSocket, &fileName, 0) <= 0){        //recebe nome do arquivo
+        printf("Conexao com monitor perdida.\n");
+        free(fileName);
+        return -1;
+    }
+    if(strcmp(fileName->type, ERRO) == 0){
+        printf("ERRO: %s: %s", fileName->code, fileName->data);
+        free(fileName);
+        return -1;
+    }
+
+    package* copyName;
+    if(receivePackage(connectionSocket, &copyName, 0) <= 0){        //recebe nome da cópia
+        printf("Conexao com monitor perdida.\n");
+        free(fileName);
+        free(copyName);
+        return -1;
+    }
+    if(strcmp(copyName->type, ERRO) == 0){
+        printf("ERRO: %s: %s", copyName->code, copyName->data);
+        free(fileName);
+        free(copyName);
+        return -1;
+    }
+    
+    char filePath[BUFFER_SIZE];
+    strcpy(filePath, PATH);
+    strcat(filePath, fileName->data);
+
+    FILE* filePtr = fopen(filePath, "rb");
+
+    if(filePtr == NULL){
+        printf("Falha ao abrir o arquivo.\n");
+        sendError(connectionSocket, UNKNOWN_ERROR, "Falha ao abrir o arquivo.\n");
+        free(fileName);
+        free(copyName);
+        return -1;
+    }
+
+    char copyPath[BUFFER_SIZE];
+    strcpy(copyPath, PATH);
+    strcat(copyPath, copyName->data);
+
+    FILE* copyPtr = fopen(copyPath, "wb");
+
+    if(copyPtr == NULL){
+        printf("Falha ao criar a copia.\n");
+        sendError(connectionSocket, UNKNOWN_ERROR, "Falha ao criar a copia.\n");
+        fclose(filePtr);
+        free(fileName);
+        free(copyName);
+        return -1;
+    }
+    free(fileName);
+    free(copyName);
+
+    char* buffer[BUFFER_SIZE];
+    memset(buffer, 0, BUFFER_SIZE);
+    int dataSize = 0;
+
+    while(!feof(filePtr)){
+        dataSize = fread(buffer, 1, BUFFER_SIZE, filePtr);
+        fwrite(buffer, 1, dataSize, copyPtr);
+        memset(buffer, 0, BUFFER_SIZE);
+    }
+
+    fclose(filePtr);
+    fclose(copyPtr);
+
+    package* pkg = fillPackage(DATA, NORMAL, "Copia criada.\n", strlen("Copia criada.\n")+1);
+    sendPackage(connectionSocket, pkg, 0);                      // Envia resultado
+    free(pkg);
+
     return 0;
 }
 
